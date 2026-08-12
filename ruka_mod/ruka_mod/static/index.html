@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Palm Recognition</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:#09090f; --surface:#12121c; --border:#1e1e2e;
+      --green:#00d68f; --red:#ff4d6d; --yellow:#ffd166;
+      --text:#e0e0ef; --muted:#555570; --radius:12px;
+    }
+    body {
+      background: var(--bg); color: var(--text);
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      min-height: 100vh; display: flex; flex-direction: column;
+    }
+    header {
+      padding: 18px 28px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 12px;
+    }
+    header .logo { font-size: 22px; }
+    header h1 { font-size: 18px; font-weight: 600; letter-spacing: .02em; }
+    header .dot {
+      margin-left: auto; width: 10px; height: 10px;
+      border-radius: 50%; background: var(--muted); transition: background .3s;
+    }
+    header .dot.on { background: var(--green); box-shadow: 0 0 8px var(--green); }
+
+    main {
+      flex: 1; display: grid; grid-template-columns: 1fr 340px;
+      gap: 20px; padding: 20px; max-width: 1100px; margin: 0 auto; width: 100%;
+    }
+    .camera-col { display: flex; flex-direction: column; gap: 12px; }
+    .stream-wrap {
+      position: relative; border-radius: var(--radius); overflow: hidden;
+      background: #000; aspect-ratio: 4/3;
+    }
+    #stream {
+      display: block; width: 100%; height: 100%; object-fit: cover;
+      border-radius: var(--radius);
+    }
+    .panel-col { display: flex; flex-direction: column; gap: 16px; }
+
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 18px;
+    }
+    .card h2 {
+      font-size: 11px; font-weight: 600; letter-spacing: .1em;
+      text-transform: uppercase; color: var(--muted); margin-bottom: 14px;
+    }
+
+    .match-info { display: flex; flex-direction: column; gap: 8px; }
+    .match-name {
+      font-size: 26px; font-weight: 700; letter-spacing: -.01em; min-height: 36px;
+    }
+    .match-name.ok  { color: var(--green); }
+    .match-name.bad { color: var(--red); }
+    .match-name.scan { color: var(--yellow); }
+    .match-name.dim { color: var(--muted); font-weight: 400; font-size: 16px; line-height: 36px; }
+    .score-bar-wrap { display: flex; flex-direction: column; gap: 4px; }
+    .score-label { font-size: 11px; color: var(--muted); display: flex; justify-content: space-between; }
+    .score-bar { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+    .score-fill { height: 100%; border-radius: 3px; transition: width .2s, background .2s; }
+
+    .input-row { display: flex; gap: 8px; }
+    input[type=text] {
+      flex: 1; background: var(--bg); border: 1px solid var(--border);
+      border-radius: 8px; color: var(--text); padding: 8px 12px;
+      font-size: 14px; outline: none; transition: border-color .2s;
+    }
+    input[type=text]:focus { border-color: var(--green); }
+    input[type=text]::placeholder { color: var(--muted); }
+
+    button {
+      border: none; border-radius: 8px; padding: 8px 16px;
+      font-size: 13px; font-weight: 600; cursor: pointer;
+      transition: opacity .15s, transform .1s;
+    }
+    button:active { transform: scale(.97); }
+    button.primary   { background: var(--green); color: #000; }
+    button.danger    { background: var(--red); color: #fff; }
+    button.secondary { background: var(--border); color: var(--text); }
+    button:disabled  { opacity: .4; cursor: not-allowed; }
+
+    .att-row {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+    }
+    .att-btn {
+      padding: 14px 12px; border-radius: 10px; font-size: 14px;
+      font-weight: 700; border: 2px solid transparent; cursor: pointer;
+      transition: all .15s; display: flex; flex-direction: column;
+      align-items: center; gap: 4px;
+    }
+    .att-btn .ico { font-size: 22px; }
+    .att-btn.in  { background: rgba(0,214,143,.12); color: var(--green); border-color: rgba(0,214,143,.3); }
+    .att-btn.out { background: rgba(255,77,109,.10); color: var(--red); border-color: rgba(255,77,109,.3); }
+    .att-btn.in:hover  { background: rgba(0,214,143,.22); border-color: var(--green); }
+    .att-btn.out:hover { background: rgba(255,77,109,.20); border-color: var(--red); }
+    .att-btn.active { box-shadow: 0 0 0 3px currentColor inset; }
+    .att-status {
+      font-size: 13px; color: var(--muted); margin-top: 10px; min-height: 18px;
+      text-align: center;
+    }
+    .att-status.success { color: var(--green); }
+    .att-status.pending { color: var(--yellow); }
+
+    .att-list { max-height: 220px; overflow-y: auto; }
+    .att-item {
+      display: grid; grid-template-columns: 1fr auto auto;
+      gap: 8px; padding: 6px 8px; font-size: 13px;
+      border-bottom: 1px dashed var(--border);
+    }
+    .att-item:last-child { border-bottom: none; }
+    .att-item .att-name { color: var(--text); }
+    .att-item .att-in { color: var(--green); font-variant-numeric: tabular-nums; }
+    .att-item .att-out { color: var(--red); font-variant-numeric: tabular-nums; }
+    .att-item .att-empty { color: var(--muted); font-style: italic; }
+
+    .progress-wrap { margin-top: 10px; display: none; flex-direction: column; gap: 6px; }
+    .progress-wrap.show { display: flex; }
+    .progress-label { font-size: 12px; color: var(--yellow); display: flex; justify-content: space-between; }
+    .progress-bar { height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; }
+    .progress-fill { height: 100%; border-radius: 4px; background: var(--yellow); transition: width .1s; }
+    .reg-hint {
+      background: rgba(255, 209, 102, .08);
+      border: 1px solid rgba(255, 209, 102, .25);
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-top: 4px;
+      font-size: 12px;
+      color: var(--text);
+      line-height: 1.5;
+    }
+    .reg-hint-title { color: var(--yellow); font-weight: 600; margin-bottom: 4px; }
+    .reg-hint ul { margin: 0; padding-left: 16px; color: var(--muted); }
+    .reg-hint b { color: var(--text); font-weight: 600; }
+
+    .users-list { display: flex; flex-direction: column; gap: 8px; }
+    .user-item {
+      display: flex; align-items: center; justify-content: space-between;
+      background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+      padding: 10px 12px; transition: border-color .2s;
+    }
+    .user-item:hover { border-color: #2e2e44; }
+    .user-item.active-match { border-color: var(--green); background: rgba(0,214,143,.04); }
+    .user-name {
+      font-size: 14px; font-weight: 500;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .user-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--muted); transition: background .3s;
+    }
+    .user-dot.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    .del-btn {
+      background: transparent; color: var(--muted);
+      padding: 4px 8px; font-size: 16px; border-radius: 6px;
+    }
+    .del-btn:hover { color: var(--red); background: rgba(255,77,109,.1); }
+    .empty-users {
+      font-size: 13px; color: var(--muted); text-align: center; padding: 16px 0;
+    }
+
+    @media (max-width: 700px) { main { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+
+<header>
+  <span class="logo">🖐</span>
+  <h1>Palm Recognition <span style="color:var(--muted);font-size:12px;font-weight:400;margin-left:8px">(kiosk)</span></h1>
+  <div class="dot" id="ws-dot" title="WebSocket"></div>
+</header>
+
+<main>
+  <div class="camera-col">
+    <div class="stream-wrap">
+      <img id="stream" src="/stream" alt="camera stream" />
+    </div>
+  </div>
+
+  <div class="panel-col">
+    <div class="card">
+      <h2>Учёт времени</h2>
+      <div class="att-row">
+        <button class="att-btn in" id="btn-in">
+          <span class="ico">🟢</span>Приход
+        </button>
+        <button class="att-btn out" id="btn-out">
+          <span class="ico">🔴</span>Уход
+        </button>
+      </div>
+      <div class="att-status" id="att-status">Нажмите кнопку и поднесите ладонь</div>
+      <button class="secondary" id="btn-export" onclick="exportXlsx()" style="width:100%;margin-top:8px">
+        📊 Скачать Excel
+      </button>
+    </div>
+
+    <div class="card">
+      <h2>Сегодня <span id="today-count" style="color:var(--muted)">0</span></h2>
+      <div class="att-list" id="att-list">
+        <div class="empty-users">Пока никого не было</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Распознавание</h2>
+      <div class="match-info">
+        <div class="match-name dim" id="match-name">Подключение…</div>
+        <div class="score-bar-wrap" id="score-wrap" style="display:none">
+          <div class="score-label">
+            <span>Сходство</span>
+            <span id="score-pct">—</span>
+          </div>
+          <div class="score-bar"><div class="score-fill" id="score-fill" style="width:0"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Зарегистрировать</h2>
+      <div class="input-row">
+        <input type="text" id="reg-name" placeholder="Имя…" maxlength="32" />
+        <button class="primary" id="reg-btn" onclick="startRegister()">Добавить</button>
+      </div>
+      <div class="progress-wrap" id="prog-wrap">
+        <div class="progress-label">
+          <span id="prog-name">…</span>
+          <span id="prog-count">0 / 150</span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" id="prog-fill" style="width:0"></div></div>
+        <div class="reg-hint">
+          <div class="reg-hint-title">📡 Медленно подвигайте рукой:</div>
+          <ul>
+            <li>чуть <b>ближе</b> к камере → чуть <b>дальше</b></li>
+            <li>немного <b>наклоните</b> ладонь</li>
+            <li>не быстро — иначе размытие</li>
+          </ul>
+        </div>
+        <button class="secondary" style="margin-top:6px;font-size:12px" onclick="cancelRegister()">Отмена</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Зарегистрированные <span id="user-count" style="color:var(--muted)">0</span></h2>
+      <div class="users-list" id="users-list">
+        <div class="empty-users">Никого нет — добавьте первую ладонь ☝️</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Отладка</h2>
+      <button class="secondary" onclick="saveDebugFrame()" style="width:100%">
+        💾 Сохранить кадр (все стадии)
+      </button>
+      <div id="debug-msg" style="font-size:11px;color:var(--muted);margin-top:8px;min-height:14px"></div>
+    </div>
+  </div>
+</main>
+
+<script>
+let ws = null;
+let renderedUsers = [];
+
+function startWS() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws.onopen  = () => document.getElementById('ws-dot').classList.add('on');
+  ws.onclose = () => {
+    document.getElementById('ws-dot').classList.remove('on');
+    setTimeout(startWS, 2000);
+  };
+  ws.onmessage = (e) => handleResult(JSON.parse(e.data));
+}
+startWS();
+
+function handleResult(msg) {
+  const matchName = document.getElementById('match-name');
+  const scoreWrap = document.getElementById('score-wrap');
+  const scorePct  = document.getElementById('score-pct');
+  const scoreFill = document.getElementById('score-fill');
+
+  renderUsers(msg.users, msg.match?.ok ? msg.match.name : null);
+  renderAttendance(msg.intent, msg.last_event, msg.attendance_today);
+
+  if (msg.register) {
+    const r = msg.register;
+    updateProgress(r);
+    if (r.done) {
+      matchName.textContent = '✓ Готово';
+      matchName.className = 'match-name ok';
+    } else {
+      matchName.textContent = `Запись… ${r.progress}/${r.total}`;
+      matchName.className = 'match-name scan';
+    }
+    scoreWrap.style.display = 'none';
+    return;
+  }
+
+  if (!msg.hand) {
+    matchName.textContent = 'Нет руки';
+    matchName.className = 'match-name dim';
+    scoreWrap.style.display = 'none';
+    return;
+  }
+
+  if (!msg.match) {
+    matchName.textContent = 'Добавьте ладонь';
+    matchName.className = 'match-name dim';
+    scoreWrap.style.display = 'none';
+    return;
+  }
+
+  const { name, score, ok, scanning, attempt } = msg.match;
+  const pct = (score * 100).toFixed(1);
+  if (ok) {
+    matchName.textContent = `🔒 ${name}`;
+    matchName.className = 'match-name ok';
+  } else if (scanning) {
+    matchName.textContent = `Сканирую… попытка ${attempt || 1}`;
+    matchName.className = 'match-name scan';
+  } else {
+    matchName.textContent = 'Неизвестно';
+    matchName.className = 'match-name bad';
+  }
+  scoreWrap.style.display = 'flex';
+  scorePct.textContent = pct + '%';
+  scoreFill.style.width = Math.min(score * 100, 100) + '%';
+  scoreFill.style.background = ok ? 'var(--green)'
+                             : scanning ? 'var(--yellow)' : 'var(--red)';
+}
+
+function updateProgress(r) {
+  const wrap = document.getElementById('prog-wrap');
+  document.getElementById('prog-name').textContent  = r.name;
+  document.getElementById('prog-count').textContent = `${r.progress} / ${r.total}`;
+  document.getElementById('prog-fill').style.width = (r.progress / r.total * 100) + '%';
+  if (r.done) {
+    wrap.classList.remove('show');
+    document.getElementById('reg-btn').disabled = false;
+    document.getElementById('reg-name').disabled = false;
+  } else {
+    wrap.classList.add('show');
+  }
+}
+
+function startRegister() {
+  const name = document.getElementById('reg-name').value.trim();
+  if (!name) { document.getElementById('reg-name').focus(); return; }
+  fetch(`/api/register/${encodeURIComponent(name)}`, { method: 'POST' })
+    .then(() => {
+      document.getElementById('reg-btn').disabled = true;
+      document.getElementById('reg-name').disabled = true;
+      document.getElementById('prog-wrap').classList.add('show');
+      document.getElementById('prog-name').textContent  = name;
+      document.getElementById('prog-count').textContent = `0 / 150`;
+      document.getElementById('prog-fill').style.width = '0%';
+    });
+}
+
+function cancelRegister() {
+  fetch('/api/register/cancel', { method: 'POST' }).then(() => {
+    document.getElementById('prog-wrap').classList.remove('show');
+    document.getElementById('reg-btn').disabled = false;
+    document.getElementById('reg-name').disabled = false;
+    document.getElementById('reg-name').value = '';
+  });
+}
+
+document.getElementById('reg-name').addEventListener('keydown', e => {
+  if (e.key === 'Enter') startRegister();
+});
+
+function renderUsers(users, activeMatchName) {
+  if (!users) return;
+  const list = document.getElementById('users-list');
+  document.getElementById('user-count').textContent = users.length;
+
+  if (JSON.stringify(users) === JSON.stringify(renderedUsers)) {
+    document.querySelectorAll('.user-item').forEach(el => {
+      const n = el.dataset.name;
+      el.classList.toggle('active-match', n === activeMatchName);
+      el.querySelector('.user-dot').classList.toggle('on', n === activeMatchName);
+    });
+    return;
+  }
+  renderedUsers = JSON.parse(JSON.stringify(users));
+  if (!users.length) {
+    list.innerHTML = '<div class="empty-users">Никого нет — добавьте первую ладонь ☝️</div>';
+    return;
+  }
+  list.innerHTML = users.map(u => {
+    const name = u.name;
+    return `
+      <div class="user-item ${name === activeMatchName ? 'active-match' : ''}" data-name="${escHtml(name)}">
+        <div class="user-name">
+          <div class="user-dot ${name === activeMatchName ? 'on' : ''}"></div>
+          ${escHtml(name)}
+        </div>
+        <button class="del-btn" onclick="deleteUser('${escJs(name)}')" title="Удалить">✕</button>
+      </div>`;
+  }).join('');
+}
+
+function deleteUser(name) {
+  if (!confirm(`Удалить «${name}»?`)) return;
+  fetch(`/api/users/${encodeURIComponent(name)}`, { method: 'DELETE' });
+}
+
+// ── attendance ─────────────────────────────────────────────────────────────
+let lastEventKey = null;
+
+function setIntent(kind) {
+  fetch(`/api/attendance/mode/${kind}`, { method: 'POST' });
+}
+
+function cancelIntent() {
+  fetch('/api/attendance/cancel', { method: 'POST' });
+}
+
+function exportXlsx() {
+  window.location.href = '/api/attendance/export.xlsx';
+}
+
+function renderAttendance(intent, lastEvent, today) {
+  const btnIn  = document.getElementById('btn-in');
+  const btnOut = document.getElementById('btn-out');
+  const status = document.getElementById('att-status');
+
+  btnIn.classList.toggle('active',  intent === 'in');
+  btnOut.classList.toggle('active', intent === 'out');
+
+  if (lastEvent) {
+    const kindLabel = lastEvent.kind === 'in' ? 'приход' : 'уход';
+    if (lastEvent.changed) {
+      status.textContent = `✓ ${lastEvent.name} — ${kindLabel} ${lastEvent.time}`;
+      status.className = 'att-status success';
+    } else {
+      status.textContent = `${lastEvent.name} — ${kindLabel} уже был в ${lastEvent.time}`;
+      status.className = 'att-status pending';
+    }
+  } else if (intent) {
+    status.textContent = intent === 'in'
+      ? '🟢 Режим ПРИХОД — поднесите ладонь (или нажмите ещё раз чтобы отменить)'
+      : '🔴 Режим УХОД — поднесите ладонь (или нажмите ещё раз чтобы отменить)';
+    status.className = 'att-status pending';
+  } else {
+    status.textContent = 'Нажмите кнопку и поднесите ладонь';
+    status.className = 'att-status';
+  }
+
+  // today's list
+  const list = document.getElementById('att-list');
+  const count = document.getElementById('today-count');
+  const names = today ? Object.keys(today).sort() : [];
+  count.textContent = names.length;
+
+  if (!names.length) {
+    list.innerHTML = '<div class="empty-users">Пока никого не было</div>';
+    return;
+  }
+
+  list.innerHTML = names.map(n => {
+    const e = today[n];
+    const tIn = e.in
+      ? `<span class="att-in">${e.in}</span>`
+      : '<span class="att-empty">—</span>';
+    const tOut = e.out
+      ? `<span class="att-out">${e.out}</span>`
+      : '<span class="att-empty">—</span>';
+    return `
+      <div class="att-item">
+        <div class="att-name">${escHtml(n)}</div>
+        ${tIn}
+        ${tOut}
+      </div>`;
+  }).join('');
+}
+
+// click intent button to set; click same button again to cancel
+function attClick(kind) {
+  const btn = document.getElementById(kind === 'in' ? 'btn-in' : 'btn-out');
+  if (btn.classList.contains('active')) cancelIntent();
+  else setIntent(kind);
+}
+document.getElementById('btn-in').addEventListener('click', () => attClick('in'));
+document.getElementById('btn-out').addEventListener('click', () => attClick('out'));
+
+function saveDebugFrame() {
+  const msg = document.getElementById('debug-msg');
+  msg.textContent = '⏳ ждём следующий кадр…';
+  msg.style.color = 'var(--yellow)';
+  fetch('/api/debug/save', { method: 'POST' })
+    .then(() => {
+      setTimeout(() => {
+        msg.textContent = '✓ сохранено в папке debug/<timestamp>/';
+        msg.style.color = 'var(--green)';
+        setTimeout(() => { msg.textContent = ''; msg.style.color = 'var(--muted)'; }, 5000);
+      }, 400);
+    });
+}
+
+function escHtml(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function escJs(s){return s.replace(/\\/g,'\\\\').replace(/'/g,"\\'");}
+</script>
+</body>
+</html>

@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Учёт посещаемости</title>
+    <script type="module" crossorigin src="/assets/index-_pMfryZk.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-MEaYmMv9.css">
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <!-- Приветственный/прощальный оверлей: показывает high-five при приходе и heart при уходе -->
+    <script>
+      (function () {
+        var OVERLAY_MS = 3000; // сколько держать страницу на экране (мс)
+
+        // Страницы свёрстаны под макет 1280x1080 — держим iframe в этом
+        // логическом размере и масштабируем его по центру под экран.
+        var BASE_W = 1280, BASE_H = 1080;
+
+        var overlay = document.createElement("div");
+        overlay.id = "greeting-overlay";
+        overlay.style.cssText =
+          "position:fixed;inset:0;z-index:2147483647;display:none;" +
+          "align-items:center;justify-content:center;overflow:hidden;background:#ffffff";
+        var frame = document.createElement("iframe");
+        frame.style.cssText =
+          "width:" + BASE_W + "px;height:" + BASE_H + "px;border:0;display:block;" +
+          "opacity:0;transition:opacity .15s ease;transform-origin:center center";
+        overlay.appendChild(frame);
+        document.body.appendChild(overlay);
+
+        function fit() {
+          var k = Math.min(window.innerWidth / BASE_W, window.innerHeight / BASE_H);
+          frame.style.transform = "scale(" + k + ")";
+        }
+        window.addEventListener("resize", function () {
+          if (overlay.style.display !== "none") fit();
+        });
+
+        // Страница внутри iframe сначала рисует серую превью-заставку и
+        // только потом подменяет документ на настоящую анимацию. Пока идёт
+        // распаковка — держим iframe прозрачным (виден белый фон оверлея),
+        // и показываем ровно в тот момент, когда контент готов.
+        function contentReady() {
+          try {
+            var doc = frame.contentDocument;
+            if (!doc || !doc.body) return false;
+            if (doc.getElementById("__bundler_thumbnail")) return false; // ещё превью
+            return !!doc.body.querySelector("section");                  // контент смонтирован
+          } catch (e) {
+            return true; // не должно случаться (тот же origin), но не залипаем
+          }
+        }
+
+        var hideTimer = null;
+        var seq = 0;
+        function show(url) {
+          var mine = ++seq;
+          if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+          frame.style.opacity = "0";
+          frame.src = url;
+          overlay.style.display = "flex";
+          fit();
+
+          var start = Date.now();
+          (function waitReady() {
+            if (mine !== seq) return; // пришло новое событие — этот показ отменён
+            if (contentReady() || Date.now() - start > 2500) {
+              frame.style.opacity = "1";
+              hideTimer = setTimeout(hide, OVERLAY_MS);
+            } else {
+              requestAnimationFrame(waitReady);
+            }
+          })();
+        }
+        function hide() {
+          seq++;
+          overlay.style.display = "none";
+          frame.style.opacity = "0";
+          frame.src = "about:blank";
+        }
+
+        var lastKey = null;
+        function handleEvent(le) {
+          if (!le || !le.changed || le.blocked) return;
+          if (le.kind !== "in" && le.kind !== "out") return;
+          var key = (le.day || "") + " " + (le.time || "") + " " + le.kind + " " + (le.name || "");
+          if (key === lastKey) return; // событие транслируется каждый кадр ~4 c — показываем один раз
+          lastKey = key;
+          if (le.kind === "in") {
+            show("/high-five.html?name=" + encodeURIComponent(le.name || ""));
+          } else {
+            show("/heart.html");
+          }
+        }
+
+        function connect() {
+          var proto = location.protocol === "https:" ? "wss:" : "ws:";
+          var ws = new WebSocket(proto + "//" + location.host + "/ws");
+          ws.onmessage = function (ev) {
+            try {
+              var msg = JSON.parse(ev.data);
+              handleEvent(msg.last_event);
+            } catch (e) {}
+          };
+          ws.onclose = function () {
+            setTimeout(connect, 1500); // переподключение при разрыве
+          };
+        }
+        connect();
+      })();
+    </script>
+  </body>
+</html>
