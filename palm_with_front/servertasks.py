@@ -11,6 +11,7 @@ Run:  python server.py
 
 import asyncio
 import contextlib
+from collections import deque
 import io
 import json
 import os
@@ -61,6 +62,7 @@ MARGIN = 0.08               # минимальный отрыв первого �
 MIN_SCAN_FRAMES = 5         # (устарело — заменено на AVG_MIN_FRAMES)
 # ── усреднение эмбеддингов при распознавании ──
 AVG_MIN_FRAMES = 6          # сколько КАЧЕСТВЕННЫХ кадров усреднить перед локом (обычно 5–10)
+AVG_WINDOW = 12             # скользящее окно: усредняем ПОСЛЕДНИЕ N кадров (старые забываем)
 # ── контроль качества входного кадра (отбраковка до эмбеддинга) ──
 MIN_PALM_SIZE = 80          # мин. длина ладони wrist→middle MCP в px; меньше — далеко/мелко
 MAX_TILT = 1.2              # макс. наклон ладони (z-разброс / размер); больше — слишком косо
@@ -297,23 +299,22 @@ def scan_update(feat: np.ndarray | None, db: dict, hand_present: bool) -> dict |
     if not db:
         return None
 
-    # копим только качественные кадры (отбракованные приходят с feat=None)
+    # копим только качественные кадры в СКОЛЬЗЯЩЕЕ окно (deque сам вытесняет
+    # старые за maxlen=AVG_WINDOW) — ранние неудачные кадры со временем забываются
+    win = sc["emb_window"]
     if feat is not None:
-        if sc["emb_sum"] is None:
-            sc["emb_sum"] = np.zeros(EMBED_DIM, dtype=np.float32)
-        sc["emb_sum"] += feat
-        sc["good_frames"] += 1
+        win.append(feat)
 
     # ещё нет ни одного качественного кадра — просто сканируем
-    if sc["good_frames"] == 0:
+    if len(win) == 0:
         return {
             "name": None, "code": None, "score": None, "second": None,
             "ok": False, "scanning": True,
             "attempt": sc["seen_frames"] // FRAMES_PER_ATTEMPT + 1,
         }
 
-    # усреднённый эмбеддинг (mean-pool) + ре-нормализация → один вектор ладони
-    avg = sc["emb_sum"] / sc["good_frames"]
+    # усреднённый эмбеддинг (mean-pool по окну) + ре-нормализация → один вектор
+    avg = np.mean(np.stack(win, axis=0), axis=0)
     avg = avg / (np.linalg.norm(avg) + 1e-9)
 
     res = _vectorized_per_user_max(avg)           # сравниваем ОДИН усреднённый вектор
@@ -337,8 +338,8 @@ def scan_update(feat: np.ndarray | None, db: dict, hand_present: bool) -> dict |
     best_peak = float(scores[best_idx])
     margin_ok = second_peak < 0 or (best_peak - second_peak) >= MARGIN
 
-    # лок только когда усреднили достаточно качественных кадров И порог/отрыв ок
-    if sc["good_frames"] >= AVG_MIN_FRAMES and best_peak >= LOCK_THRESHOLD and margin_ok:
+    # лок только когда в окне достаточно качественных кадров И порог/отрыв ок
+    if len(win) >= AVG_MIN_FRAMES and best_peak >= LOCK_THRESHOLD and margin_ok:
         sc["locked"] = {
             "name": best_display, "code": best_code, "score": round(best_peak, 4),
             "second": round(second_peak, 4) if second_peak > -1 else None,
@@ -426,7 +427,7 @@ state = {
     "attendance": load_attendance(),
     "tpl_cache": {"matrix": None, "user_idx": None, "names": []},
     "reg": {"active": False, "name": None, "code": None, "buffer": []},
-    "scan": {"emb_sum": None, "good_frames": 0,
+    "scan": {"emb_window": deque(maxlen=AVG_WINDOW),
              "seen_frames": 0, "missing": 0, "locked": None, "acted": False},
     # attendance intent: None | "in" | "out". When set, the next confident lock
     # records that event for the recognized user and clears the intent.
@@ -442,7 +443,7 @@ state = {
 
 
 def _reset_scan():
-    state["scan"].update(emb_sum=None, good_frames=0,
+    state["scan"].update(emb_window=deque(maxlen=AVG_WINDOW),
                          seen_frames=0, missing=0, locked=None, acted=False)
 
 
