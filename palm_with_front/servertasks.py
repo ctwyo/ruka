@@ -58,7 +58,12 @@ TEMPLATES_PER_USER = 5      # 5 шаблонов из 150 кадров = 1 ша�
 LOCK_THRESHOLD = 0.85      # порог косинусной близости: ниже — не свой
 # MARGIN = 0.05             # старое значение
 MARGIN = 0.08               # минимальный отрыв первого кандидата от второго
-MIN_SCAN_FRAMES = 5         # минимум кадров перед локом (защита от случайного матча за 1 кадр)
+MIN_SCAN_FRAMES = 5         # (устарело — заменено на AVG_MIN_FRAMES)
+# ── усреднение эмбеддингов при распознавании ──
+AVG_MIN_FRAMES = 6          # сколько КАЧЕСТВЕННЫХ кадров усреднить перед локом (обычно 5–10)
+# ── контроль качества входного кадра (отбраковка до эмбеддинга) ──
+MIN_PALM_SIZE = 80          # мин. длина ладони wrist→middle MCP в px; меньше — далеко/мелко
+MAX_TILT = 1.2              # макс. наклон ладони (z-разброс / размер); больше — слишком косо
 FRAMES_PER_ATTEMPT = 15     # как часто инкрементится номер «попытки» в UI (~1 сек при 15 fps)
 HAND_LOST_FRAMES = 6        # сколько кадров без руки до сброса сканирования
 ROI_PAD = 1.3               # размер кропа относительно длины ладони (wrist→middle MCP)
@@ -168,6 +173,40 @@ def extract_palm_roi(frame: np.ndarray, landmarks):
     return crop, mask
 
 
+def palm_quality(frame_shape, landmarks) -> tuple[bool, str]:
+    """Отбраковка кадра ДО эмбеддинга. Возвращает (ok, короткая_причина).
+
+    Плохие кадры (мелкая/за кадром/сильно наклонённая ладонь) не должны
+    попадать в усреднение — иначе они портят итоговый вектор и дают
+    ложные совпадения. Пороги — вверху файла (MIN_PALM_SIZE / MAX_TILT).
+    """
+    h, w = frame_shape[:2]
+    pts = np.array([[lm.x * w, lm.y * h] for lm in landmarks], dtype=np.float32)
+    palm_size = float(np.linalg.norm(pts[9] - pts[0]))   # wrist(0) → middle MCP(9)
+
+    # 1) слишком маленькая / далеко от камеры
+    if palm_size < MIN_PALM_SIZE:
+        return False, "ближе"
+
+    # 2) частично за кадром: опорные точки ладони должны быть внутри кадра
+    palm_idx = [0, 1, 2, 5, 9, 13, 17]   # запястье + основания пальцев
+    m = 2.0
+    for i in palm_idx:
+        x, y = pts[i]
+        if x < m or x > w - m or y < m or y > h - m:
+            return False, "в кадр"
+
+    # 3) наклон: разброс глубины z опорных точек относительно размера ладони.
+    #    z у MediaPipe примерно в тех же единицах, что x (доля ширины кадра).
+    zs = np.array([landmarks[i].z for i in palm_idx], dtype=np.float32)
+    palm_norm = palm_size / w
+    tilt = float(zs.max() - zs.min()) / (palm_norm + 1e-6)
+    if tilt > MAX_TILT:
+        return False, "ровнее"
+
+    return True, "ok"
+
+
 def compute_embedding(roi: np.ndarray, mask: np.ndarray | None = None,
                       debug_dir: str | None = None) -> np.ndarray | None:
     if roi is None or roi.size == 0:
@@ -234,53 +273,72 @@ def _vectorized_per_user_max(feat: np.ndarray) -> tuple[list[str], np.ndarray] |
     return cache["names"], per_user_max
 
 
-def scan_update(feat: np.ndarray | None, db: dict) -> dict | None:
+def scan_update(feat: np.ndarray | None, db: dict, hand_present: bool) -> dict | None:
+    """Накапливает КАЧЕСТВЕННЫЕ эмбеддинги, усредняет их (mean-pool) и решает
+    по одному «чистому» вектору, а не по лучшему случайному кадру.
+
+    feat is None при живой руке = кадр отбракован контролем качества —
+    такой кадр в усреднение не идёт, но потерей руки НЕ считается.
+    """
     sc = state["scan"]
-    if feat is None:
+
+    # рука пропала из кадра — считаем потерю, при HAND_LOST_FRAMES сбрасываем
+    if not hand_present:
         sc["missing"] += 1
         if sc["missing"] >= HAND_LOST_FRAMES:
             _reset_scan()
         return sc["locked"]
-
     sc["missing"] = 0
     sc["seen_frames"] += 1
+
+    # уже залочено — держим результат, копить дальше не нужно
+    if sc["locked"] is not None:
+        return sc["locked"]
     if not db:
         return None
 
-    res = _vectorized_per_user_max(feat)          # ← BLAS-vectorized
+    # копим только качественные кадры (отбракованные приходят с feat=None)
+    if feat is not None:
+        if sc["emb_sum"] is None:
+            sc["emb_sum"] = np.zeros(EMBED_DIM, dtype=np.float32)
+        sc["emb_sum"] += feat
+        sc["good_frames"] += 1
+
+    # ещё нет ни одного качественного кадра — просто сканируем
+    if sc["good_frames"] == 0:
+        return {
+            "name": None, "code": None, "score": None, "second": None,
+            "ok": False, "scanning": True,
+            "attempt": sc["seen_frames"] // FRAMES_PER_ATTEMPT + 1,
+        }
+
+    # усреднённый эмбеддинг (mean-pool) + ре-нормализация → один вектор ладони
+    avg = sc["emb_sum"] / sc["good_frames"]
+    avg = avg / (np.linalg.norm(avg) + 1e-9)
+
+    res = _vectorized_per_user_max(avg)           # сравниваем ОДИН усреднённый вектор
     if res is None:
         return None
     names, scores = res
 
-    # initialise / re-init peaks if user count changed
-    if sc["peaks_arr"] is None or len(sc["peaks_arr"]) != len(names):
-        sc["peaks_arr"] = np.full(len(names), -1.0, dtype=np.float32)
-        sc["peaks_names"] = names
-        sc["peaks_display"] = state["tpl_cache"].get("display_names", names)
-    # vectorized "running max"
-    np.maximum(sc["peaks_arr"], scores, out=sc["peaks_arr"])
-
     # top-2 via argpartition (O(n) — no full sort even at 50K users)
-    arr = sc["peaks_arr"]
-    if len(arr) == 1:
+    if len(scores) == 1:
         best_idx, second_peak = 0, -1.0
     else:
-        # negate so we get the largest two
-        idx2 = np.argpartition(-arr, 1)[:2]
-        if arr[idx2[0]] >= arr[idx2[1]]:
+        idx2 = np.argpartition(-scores, 1)[:2]
+        if scores[idx2[0]] >= scores[idx2[1]]:
             best_idx, second_idx = int(idx2[0]), int(idx2[1])
         else:
             best_idx, second_idx = int(idx2[1]), int(idx2[0])
-        second_peak = float(arr[second_idx])
-    best_code = sc["peaks_names"][best_idx]
-    best_display = sc["peaks_display"][best_idx] if sc.get("peaks_display") else best_code
-    best_peak = float(arr[best_idx])
+        second_peak = float(scores[second_idx])
+    display = state["tpl_cache"].get("display_names", names)
+    best_code = names[best_idx]
+    best_display = display[best_idx] if display else best_code
+    best_peak = float(scores[best_idx])
     margin_ok = second_peak < 0 or (best_peak - second_peak) >= MARGIN
 
-    if sc["locked"] is not None:
-        return sc["locked"]
-
-    if sc["seen_frames"] >= MIN_SCAN_FRAMES and best_peak >= LOCK_THRESHOLD and margin_ok:
+    # лок только когда усреднили достаточно качественных кадров И порог/отрыв ок
+    if sc["good_frames"] >= AVG_MIN_FRAMES and best_peak >= LOCK_THRESHOLD and margin_ok:
         sc["locked"] = {
             "name": best_display, "code": best_code, "score": round(best_peak, 4),
             "second": round(second_peak, 4) if second_peak > -1 else None,
@@ -368,7 +426,7 @@ state = {
     "attendance": load_attendance(),
     "tpl_cache": {"matrix": None, "user_idx": None, "names": []},
     "reg": {"active": False, "name": None, "code": None, "buffer": []},
-    "scan": {"peaks_arr": None, "peaks_names": None, "peaks_display": None,
+    "scan": {"emb_sum": None, "good_frames": 0,
              "seen_frames": 0, "missing": 0, "locked": None, "acted": False},
     # attendance intent: None | "in" | "out". When set, the next confident lock
     # records that event for the recognized user and clears the intent.
@@ -384,7 +442,7 @@ state = {
 
 
 def _reset_scan():
-    state["scan"].update(peaks_arr=None, peaks_names=None, peaks_display=None,
+    state["scan"].update(emb_sum=None, good_frames=0,
                          seen_frames=0, missing=0, locked=None, acted=False)
 
 
@@ -526,9 +584,16 @@ def handle_frame(frame: np.ndarray) -> tuple[bytes | None, dict]:
         out["palm_bbox"] = [float(pts[:, 0].min()), float(pts[:, 1].min()),
                             float(pts[:, 0].max()), float(pts[:, 1].max())]
         
-        roi, palm_mask = extract_palm_roi(frame, hand)
-        feat = compute_embedding(roi, mask=palm_mask, debug_dir=debug_dir)
-        
+        # контроль качества: мелкую / за кадром / наклонённую ладонь в
+        # усреднение не пускаем (feat=None), но руку считаем присутствующей
+        q_ok, q_reason = palm_quality(frame.shape, hand)
+        out["hand_quality"] = q_reason
+        if q_ok:
+            roi, palm_mask = extract_palm_roi(frame, hand)
+            feat = compute_embedding(roi, mask=palm_mask, debug_dir=debug_dir)
+        else:
+            feat = None
+
         # Переводим нормализованные координаты всех 21 точек в физические пиксели кадра
         pixel_pts = [(int(lm.x * w_), int(lm.y * h_)) for lm in hand]
         
@@ -601,7 +666,7 @@ def handle_frame(frame: np.ndarray) -> tuple[bytes | None, dict]:
             reg.update(active=False, name=None, code=None, buffer=[])
             _reset_scan()
     elif db:
-        out["match"] = scan_update(feat, db)
+        out["match"] = scan_update(feat, db, out["hand"])
 
         # ─── intent commit: record check-in/out the FIRST time a lock fires ──
         m = out["match"]
