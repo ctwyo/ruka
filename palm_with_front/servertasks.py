@@ -57,7 +57,7 @@ WEIGHTS_PATH = Path(__file__).parent / "compnet" / "weights.pth"
 SAMPLES = 150               # кадров на регистрацию (~10 сек при 15 fps)
 TEMPLATES_PER_USER = 5      # 5 шаблонов из 150 кадров = 1 шаблон каждые ~2 сек
 # LOCK_THRESHOLD = 0.75     # старое значение
-LOCK_THRESHOLD = 0.85      # порог косинусной близости: ниже — не свой
+LOCK_THRESHOLD = 0.80    # порог косинусной близости: ниже — не свой
 # MARGIN = 0.05             # старое значение
 MARGIN = 0.08               # минимальный отрыв первого кандидата от второго
 MIN_SCAN_FRAMES = 5         # (устарело — заменено на AVG_MIN_FRAMES)
