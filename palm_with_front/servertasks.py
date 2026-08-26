@@ -10,6 +10,7 @@ Run:  python server.py
 """
 
 import asyncio
+import base64
 import contextlib
 from collections import deque
 import io
@@ -439,6 +440,8 @@ state = {
     "camera_ok": False,
     "save_debug": False,
     "last_debug_dir": None,
+    "save_testframe": False,     # запрос сырого кадра из /testframe
+    "testframe_info": None,      # результат: статистика последнего сырого кадра
 }
 
 
@@ -451,9 +454,53 @@ def _reset_scan():
 _rebuild_template_cache()
 
 
+def _dump_testframe(frame: np.ndarray) -> None:
+    """Сохраняет СЫРОЙ кадр (raw/gray/clahe) в static/ и кладёт статистику в
+    state['testframe_info']. Нужно, чтобы понять: камера отдаёт монохром
+    (похоже на ИК) или обычную цветную RGB-картинку, и видны ли вены."""
+    static = Path(__file__).parent / "static"
+    raw = frame.copy()
+    cv2.imwrite(str(static / "testframe_raw.png"), raw)
+
+    if raw.ndim == 3 and raw.shape[2] == 3:
+        channels = 3
+        r = raw[..., 2].astype(np.int32)
+        g = raw[..., 1].astype(np.int32)
+        b = raw[..., 0].astype(np.int32)
+        # насколько каналы различаются: ~0 => монохром (сенсор без цвета, ИК-подобно)
+        chan_diff = float((np.abs(r - g).mean() + np.abs(g - b).mean()) / 2.0)
+        gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
+    else:
+        channels = 1
+        chan_diff = 0.0
+        gray = raw if raw.ndim == 2 else raw[..., 0]
+
+    cv2.imwrite(str(static / "testframe_gray.png"), gray)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+    cv2.imwrite(str(static / "testframe_clahe.png"), clahe)
+
+    state["testframe_info"] = {
+        "shape": list(raw.shape),
+        "channels": channels,
+        "dtype": str(raw.dtype),
+        "channel_diff": round(chan_diff, 2),      # ≈0 → монохром/ИК-подобно
+        "looks_grayscale": bool(chan_diff < 2.0),
+        "brightness_mean": round(float(gray.mean()), 1),
+        "brightness_min": int(gray.min()),
+        "brightness_max": int(gray.max()),
+    }
+
+
 # ── per-frame processing (runs in executor thread) ───────────────────────────
 def handle_frame(frame: np.ndarray) -> tuple[bytes | None, dict]:
     # frame = cv2.flip(frame, 1)  # mirror for selfie view (disabled: keep real hand direction)
+
+    # запрос сырого кадра из /testframe — снимаем ДО любой обработки/отрисовки
+    if state.get("save_testframe"):
+        try:
+            _dump_testframe(frame)
+        finally:
+            state["save_testframe"] = False
 
     out: dict = {
         "hand": False, "match": None, "register": None,
@@ -584,7 +631,7 @@ def handle_frame(frame: np.ndarray) -> tuple[bytes | None, dict]:
         pts = np.array([[lm.x * w_, lm.y * h_] for lm in hand], dtype=np.float32)
         out["palm_bbox"] = [float(pts[:, 0].min()), float(pts[:, 1].min()),
                             float(pts[:, 0].max()), float(pts[:, 1].max())]
-        
+
         # контроль качества: мелкую / за кадром / наклонённую ладонь в
         # усреднение не пускаем (feat=None), но руку считаем присутствующей
         q_ok, q_reason = palm_quality(frame.shape, hand)
@@ -1109,6 +1156,81 @@ if _assets.exists():
 @app.get("/")
 async def index():
     return HTMLResponse((STATIC / "index.html").read_text(encoding="utf-8"))
+
+
+@app.get("/api/testframe/grab")
+async def testframe_grab():
+    """Ловит СЫРОЙ кадр (до обработки) и возвращает статистику + картинки в base64."""
+    state["testframe_info"] = None
+    state["save_testframe"] = True
+    for _ in range(80):                       # ждём захвата до ~4 сек
+        if state["testframe_info"] is not None:
+            break
+        await asyncio.sleep(0.05)
+    info = state["testframe_info"]
+    if info is None:
+        return {"ok": False, "error": "камера не отдаёт кадры (не открыта?)"}
+
+    def b64(name: str) -> str:
+        p = STATIC / name
+        return base64.b64encode(p.read_bytes()).decode() if p.exists() else ""
+
+    return {
+        "ok": True,
+        "info": info,
+        "raw": b64("testframe_raw.png"),
+        "gray": b64("testframe_gray.png"),
+        "clahe": b64("testframe_clahe.png"),
+    }
+
+
+@app.get("/testframe")
+async def testframe():
+    """Страница с ОНЛАЙН-видео и кнопкой «Сделать снимок»."""
+    html = """<!doctype html><meta charset="utf-8">
+<body style="font-family:sans-serif;background:#111;color:#eee;padding:16px;line-height:1.5">
+  <h2>Тестовый кадр</h2>
+  <div>Онлайн с камеры — наведи ладонь:</div>
+  <img src="/stream" style="max-width:520px;border:1px solid #444;border-radius:8px;margin:8px 0">
+  <div>
+    <button onclick="grab()" style="font-size:18px;padding:10px 22px;border-radius:999px;
+      border:0;background:#2d7;cursor:pointer;font-weight:700">📸 Сделать снимок</button>
+    <span id="status" style="margin-left:12px;color:#9cf"></span>
+  </div>
+  <div id="result" style="margin-top:16px"></div>
+  <script>
+    async function grab() {
+      const s = document.getElementById('status');
+      s.textContent = 'снимаю…';
+      try {
+        const r = await fetch('/api/testframe/grab');
+        const d = await r.json();
+        if (!d.ok) { s.textContent = 'ошибка: ' + (d.error || ''); return; }
+        s.textContent = '';
+        const verdict = d.info.looks_grayscale
+          ? 'похоже на МОНОХРОМ / ИК'
+          : 'похоже на обычную ЦВЕТНУЮ RGB-картинку';
+        document.getElementById('result').innerHTML =
+          '<h3>' + verdict + '</h3>' +
+          '<p><b>channel_diff ≈ 0</b> и <b>looks_grayscale=true</b> → монохром (характерно для ИК). '
+          + 'Большой channel_diff → цветная RGB, «ИК-инвариантности» нет.</p>' +
+          '<pre style="background:#000;padding:10px;border-radius:8px">'
+          + JSON.stringify(d.info, null, 2) + '</pre>' +
+          '<div style="display:flex;gap:14px;flex-wrap:wrap">' +
+            card('RAW (как приходит с камеры)', d.raw) +
+            card('GRAY', d.gray) +
+            card('CLAHE (тут проступят вены, если камера их видит)', d.clahe) +
+          '</div>';
+      } catch (e) { s.textContent = 'ошибка: ' + e; }
+    }
+    function card(title, b64) {
+      return '<div><div>' + title + '</div>' +
+        '<img src="data:image/png;base64,' + b64 +
+        '" style="max-width:440px;border:1px solid #444"></div>';
+    }
+  </script>
+</body>"""
+    return HTMLResponse(html)
 
 
 @app.get("/high-five.html")
