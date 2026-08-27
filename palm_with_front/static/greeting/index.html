@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Приветствие</title>
+
+<link rel="preload" href="nunito-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="nunito-latin.woff2"    as="font" type="font/woff2" crossorigin>
+
+<style>
+  /* Nunito 900 — только нужные подмножества (кириллица + латиница для цифр
+     и пунктуации). font-display:block, чтобы на трёхсекундном показе не
+     мелькала подстановка системного шрифта. */
+  @font-face {
+    font-family: 'Nunito'; font-style: normal; font-weight: 900; font-display: block;
+    src: url("nunito-cyrillic.woff2") format('woff2');
+    unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+  }
+  @font-face {
+    font-family: 'Nunito'; font-style: normal; font-weight: 900; font-display: block;
+    src: url("nunito-latin.woff2") format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+                   U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122,
+                   U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  }
+
+  :root {
+    /* Фон и текст совпадают с дашбордом: одинаковая яркость по обе стороны
+       перехода — иначе появление оверлея читается как вспышка.
+       ВНИМАНИЕ: картинки перематированы под этот цвет. Поменяете его —
+       вокруг фигур вылезет кайма от старой подложки, картинки надо
+       перематировать заново: node scripts/rematte.mjs <png> <цвет> <выход>.
+       Тот же цвет продублирован в static/index.html (переменная BG). */
+    --bg:  #E9ECF1;
+    --ink: #16130F;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  /* Фон задан и на html, и на body: первый же кадр рисуется нужным цветом,
+     без белой вспышки до применения стилей. */
+  html, body {
+    width: 100%; height: 100%;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: Nunito, sans-serif;
+    overflow: hidden;
+  }
+
+  .screen {
+    width: 100%; height: 100%;
+    display: flex; flex-direction: column; align-items: center;
+    text-align: center;
+  }
+
+  /* До команды на показ страница не рисует ничего: успевают загрузиться шрифт
+     с картинкой и подобраться кегль имени, а анимации потом играют с первого
+     кадра, а не доигрывают невидимыми. */
+  html:not([data-play]) .screen { visibility: hidden; }
+
+  .name   { font-size: 104px; font-weight: 900; letter-spacing: -1px; line-height: 1; white-space: nowrap; }
+  .phrase { font-size:  78px; font-weight: 900; letter-spacing: -1px; line-height: 1.05; margin-top: 14px; }
+  .thanks { font-size:  64px; font-weight: 900; letter-spacing: -1px; line-height: 1.1; }
+
+  /* Имени нет — фраза становится главной строкой. */
+  .no-name .phrase { font-size: 104px; line-height: 1; margin-top: 0; }
+
+  @keyframes fadeDown  { from { opacity: 0; transform: translateY(-26px); } to { opacity: 1; transform: none; } }
+  @keyframes fadeUp    { from { opacity: 0; transform: translateY(20px);  } to { opacity: 1; transform: none; } }
+  @keyframes pop       { 0% { opacity: 0; transform: scale(.72); } 60% { opacity: 1; transform: scale(1.03); }
+                         80% { transform: scale(.99); } 100% { opacity: 1; transform: scale(1); } }
+  @keyframes softScale { from { opacity: 0; transform: scale(.9); } to { opacity: 1; transform: scale(1); } }
+
+  /* Длительности подобраны под проявление оверлея (FADE_IN_MS в index.html):
+     фон и контент должны выходить на полную видимость примерно одновременно,
+     иначе сначала вспыхивает пустой фон, а текст догоняет его отдельно. */
+  html[data-play] .text   { animation: fadeDown .34s both ease-out; }
+  html[data-play] .thanks { animation: fadeUp   .38s .06s both ease; }
+
+  /* ── Приход ─────────────────────────────────────────── */
+  body[data-kind="in"]  .screen { justify-content: flex-start; padding: 150px 90px 70px; }
+  body[data-kind="in"]  .art    { width: 480px; margin-top: 34px; transform-origin: center bottom; }
+  html[data-play] body[data-kind="in"] .art { animation: pop .5s both cubic-bezier(.22,.68,.32,1); }
+
+  /* ── Уход ───────────────────────────────────────────── */
+  body[data-kind="out"] .screen { justify-content: space-between; padding: 140px 110px; }
+  body[data-kind="out"] .art    { width: 300px; transform-origin: center; }
+  html[data-play] body[data-kind="out"] .art { animation: softScale .46s both ease; }
+
+  body[data-kind="in"] .thanks { display: none; }
+</style>
+</head>
+<body data-kind="in">
+
+<section class="screen">
+  <div class="text">
+    <div class="name"   id="name"></div>
+    <div class="phrase" id="phrase"></div>
+  </div>
+  <img class="art" id="art" alt="">
+  <div class="thanks">Спасибо за вашу<br>работу</div>
+</section>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  var q    = new URLSearchParams(location.search);
+  var kind = q.get("kind") === "out" ? "out" : "in";
+
+  var MODES = {
+    in:  { phrase: "добро пожаловать!", solo: "Добро пожаловать!",
+           img: "highfive.png", w: 480, h: 575, alt: "дай пять" },
+    out: { phrase: "хорошего отдыха!",  solo: "Хорошего отдыха!",
+           img: "heart.png",    w: 209, h: 219, alt: "сердце" }
+  };
+  var mode = MODES[kind];
+  document.body.dataset.kind = kind;
+
+  // В базе имена лежат как «Фамилия Имя [Отчество]» — на экране нужно только
+  // имя. Если пришёл один токен, значит имя уже передали в чистом виде.
+  function givenName(full) {
+    var parts = String(full || "").trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return "";
+    return parts.length >= 2 ? parts[1] : parts[0];
+  }
+
+  var name    = givenName(q.get("name"));
+  var elName  = document.getElementById("name");
+  var elPhr   = document.getElementById("phrase");
+  var elArt   = document.getElementById("art");
+
+  // textContent, а не innerHTML: имя приходит из URL и не должно
+  // трактоваться как разметка.
+  if (name) {
+    elName.textContent = name + ",";
+    elPhr.textContent  = mode.phrase;
+  } else {
+    elName.remove();
+    elPhr.textContent = mode.solo;
+    document.body.classList.add("no-name");
+  }
+
+  elArt.width = mode.w; elArt.height = mode.h;
+  elArt.alt = mode.alt; elArt.src = mode.img;
+
+  // Страховка от неожиданно длинного имени: ужимаем кегль, пока строка не
+  // влезет по ширине. Обычные имена (до ~12 знаков) остаются на 104px.
+  function fitName() {
+    if (!name || !elName.isConnected) return;
+    var avail = elName.parentNode.clientWidth;
+    if (!avail) return;
+    for (var size = 104; size > 44 && elName.scrollWidth > avail; size -= 2) {
+      elName.style.fontSize = size + "px";
+    }
+  }
+
+  var waits = [
+    document.fonts ? document.fonts.ready : Promise.resolve(),
+    elArt.decode ? elArt.decode().catch(function () {}) : Promise.resolve()
+  ];
+
+  function ready() {
+    if (root.hasAttribute("data-ready")) return;
+    fitName();                       // кегль меряем уже с загруженным шрифтом
+    root.setAttribute("data-ready", "1");
+    // Открыли страницу напрямую, без оверлея — играем сами.
+    setTimeout(function () { root.setAttribute("data-play", "1"); }, 250);
+  }
+
+  Promise.all(waits).then(ready);
+  setTimeout(ready, 1200);           // если шрифт или картинка не доедут
+})();
+</script>
+
+</body>
+</html>

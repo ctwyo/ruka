@@ -1,0 +1,130 @@
+/* ─────────────────────────────────────────────────────────────────────────
+   Светлая тема дашборда.
+
+   Фронтенд собран Vite в assets/index-*.css с тёмной палитрой, а исходников
+   (papka frontend/, которую ищет build-frontend) в репозитории нет — поэтому
+   тема сделана переопределением тех же классов, а не правкой собранного CSS.
+   Файл подключается в index.html ПОСЛЕ стилей Vite: селекторы совпадают
+   один в один, побеждает порядок подключения.
+
+   Фон #E9ECF1 совпадает с фоном /greeting/ (--bg) и с BG в index.html:
+   одинаковая яркость по обе стороны перехода, иначе появление приветствия
+   читается как вспышка. Меняете один — меняйте все три.
+
+   Акценты затемнены: на тёмном фоне мятный #00d68f и жёлтый #ffd166 читались
+   отлично, на светлом их контраст падает до ~1.4–1.9 к фону, то есть текст
+   становится нечитаемым. Заливки и подложки-тинты оставлены исходными —
+   на светлом они дают те же пастельные карточки.
+   ───────────────────────────────────────────────────────────────────────── */
+
+html, body { background: #E9ECF1; }
+
+/* ── Поверхности ─────────────────────────────────────────────────────── */
+.bg-\[\#09090f\] { --tw-bg-opacity: 1; background-color: rgb(233 236 241 / var(--tw-bg-opacity, 1)); }
+.bg-\[\#12121c\] { --tw-bg-opacity: 1; background-color: rgb(255 255 255 / var(--tw-bg-opacity, 1)); }
+.bg-\[\#1e1e2e\] { --tw-bg-opacity: 1; background-color: rgb(255 255 255 / var(--tw-bg-opacity, 1)); }
+
+.hover\:bg-\[\#1e1e2e\]:hover  { --tw-bg-opacity: 1; background-color: rgb(241 244 248 / var(--tw-bg-opacity, 1)); }
+.hover\:bg-\[\#2e2e44\]:hover  { --tw-bg-opacity: 1; background-color: rgb(226 231 238 / var(--tw-bg-opacity, 1)); }
+.active\:bg-\[\#2e2e44\]:active{ --tw-bg-opacity: 1; background-color: rgb(216 222 231 / var(--tw-bg-opacity, 1)); }
+
+/* ── Текст ───────────────────────────────────────────────────────────── */
+.text-\[\#e0e0ef\]        { --tw-text-opacity: 1; color: rgb(22 19 15 / var(--tw-text-opacity, 1)); }
+.hover\:text-\[\#e0e0ef\]:hover { --tw-text-opacity: 1; color: rgb(22 19 15 / var(--tw-text-opacity, 1)); }
+.text-\[\#555570\]        { --tw-text-opacity: 1; color: rgb(107 114 128 / var(--tw-text-opacity, 1)); }
+
+.text-\[\#00d68f\]        { --tw-text-opacity: 1; color: rgb(0 135 90 / var(--tw-text-opacity, 1)); }
+.text-\[\#ff4d6d\]        { --tw-text-opacity: 1; color: rgb(208 27 60 / var(--tw-text-opacity, 1)); }
+.hover\:text-\[\#ff4d6d\]:hover { --tw-text-opacity: 1; color: rgb(208 27 60 / var(--tw-text-opacity, 1)); }
+.text-\[\#ffd166\]        { --tw-text-opacity: 1; color: rgb(138 97 0 / var(--tw-text-opacity, 1)); }
+.text-\[\#818cf8\]        { --tw-text-opacity: 1; color: rgb(79 70 229 / var(--tw-text-opacity, 1)); }
+
+/* ── Границы ─────────────────────────────────────────────────────────── */
+.border-\[\#1e1e2e\]      { --tw-border-opacity: 1; border-color: rgb(213 218 227 / var(--tw-border-opacity, 1)); }
+.border-\[\#1e1e2e\]\/40  { border-color: #d5dae366; }
+.border-\[\#2e2e44\]      { --tw-border-opacity: 1; border-color: rgb(196 203 214 / var(--tw-border-opacity, 1)); }
+.hover\:border-\[\#2e2e44\]:hover { --tw-border-opacity: 1; border-color: rgb(174 183 198 / var(--tw-border-opacity, 1)); }
+
+.border-\[\#00d68f\]\/30  { border-color: #00875a4d; }
+.border-\[\#00d68f\]\/40  { border-color: #00875a66; }
+.border-\[\#ff4d6d\]\/30  { border-color: #d01b3c4d; }
+.border-\[\#818cf8\]      { --tw-border-opacity: 1; border-color: rgb(79 70 229 / var(--tw-border-opacity, 1)); }
+.border-\[\#818cf8\]\/30  { border-color: #4f46e54d; }
+.border-\[\#ffd166\]      { --tw-border-opacity: 1; border-color: rgb(199 146 0 / var(--tw-border-opacity, 1)); }
+.border-\[\#ffd166\]\/10  { border-color: #c792001a; }
+.border-\[\#ffd166\]\/20  { border-color: #c7920033; }
+.border-\[\#ffd166\]\/30  { border-color: #c792004d; }
+
+/* ── Свечение вокруг индикаторов ─────────────────────────────────────── */
+/* На тёмном фоне неоновый ореол читался, на светлом превращается в грязное
+   пятно — гасим до мягкой тени того же оттенка. */
+.shadow-\[0_0_8px_\#00d68f\] { --tw-shadow: 0 3px 10px #00875a40; --tw-shadow-colored: 0 3px 10px var(--tw-shadow-color);
+  box-shadow: var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow); }
+.shadow-\[0_0_8px_\#ff4d6d\] { --tw-shadow: 0 3px 10px #d01b3c40; --tw-shadow-colored: 0 3px 10px var(--tw-shadow-color);
+  box-shadow: var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow); }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Читаемость.
+
+   Экран висит на стене, и смотрят на него с полутора-трёх метров, мельком,
+   на ходу. Это ближе к указателю в аэропорту, чем к веб-интерфейсу: решают
+   контраст, вес и чёткость края, а не тонкие оттенки. Бледные заливки на
+   10% и границы на 30% прозрачности с такого расстояния просто пропадают.
+
+   Заливки карточек не трогаю — они дают цветовое кодирование и выглядят
+   спокойно. Работаю с тем, что действительно плохо видно: линии, подписи,
+   вспомогательный текст.
+   ───────────────────────────────────────────────────────────────────────── */
+
+/* ── Линии ───────────────────────────────────────────────────────────── */
+/* Границы карточек — из полупрозрачных в плотные: край читается как край. */
+.border-\[\#00d68f\]\/30,
+.border-\[\#00d68f\]\/40 { --tw-border-opacity: 1; border-color: rgb(0 163 111 / var(--tw-border-opacity, 1)); }
+.border-\[\#ff4d6d\]\/30 { --tw-border-opacity: 1; border-color: rgb(224 50 90  / var(--tw-border-opacity, 1)); }
+.border-\[\#ffd166\]\/30 { --tw-border-opacity: 1; border-color: rgb(192 138 0  / var(--tw-border-opacity, 1)); }
+.border-\[\#818cf8\]\/30 { --tw-border-opacity: 1; border-color: rgb(99 102 241 / var(--tw-border-opacity, 1)); }
+
+/* Разделители в списках и шапках — были почти неразличимы. */
+.border-\[\#1e1e2e\]     { --tw-border-opacity: 1; border-color: rgb(195 202 214 / var(--tw-border-opacity, 1)); }
+.border-\[\#1e1e2e\]\/40 { border-color: #c3cad699; }
+.border-\[\#2e2e44\]     { --tw-border-opacity: 1; border-color: rgb(169 179 194 / var(--tw-border-opacity, 1)); }
+
+/* ── Подписи ─────────────────────────────────────────────────────────── */
+/* Цветной текст на цветной подложке — самое слабое место светлой темы.
+   Затемняю до контраста 6–7:1: цветовое кодирование сохраняется, читаемость
+   выходит на уровень чёрного текста. */
+.text-\[\#00d68f\] { --tw-text-opacity: 1; color: rgb(0 103 74   / var(--tw-text-opacity, 1)); }
+.text-\[\#ff4d6d\] { --tw-text-opacity: 1; color: rgb(184 19 52  / var(--tw-text-opacity, 1)); }
+.text-\[\#ffd166\] { --tw-text-opacity: 1; color: rgb(122 85 0    / var(--tw-text-opacity, 1)); }
+.text-\[\#818cf8\] { --tw-text-opacity: 1; color: rgb(67 56 202   / var(--tw-text-opacity, 1)); }
+.hover\:text-\[\#ff4d6d\]:hover { --tw-text-opacity: 1; color: rgb(184 19 52 / var(--tw-text-opacity, 1)); }
+
+/* Вспомогательный текст (в меню это «🔒 PIN»). */
+.text-\[\#555570\] { --tw-text-opacity: 1; color: rgb(75 85 99 / var(--tw-text-opacity, 1)); }
+
+/* ── Плитки меню ─────────────────────────────────────────────────────── */
+/* Селекторы привязаны к сетке меню, чтобы не задеть те же утилиты Tailwind
+   на внутренних экранах. */
+main.grid-cols-2 > button {
+  box-shadow: 0 1px 2px #1018280a, 0 6px 16px #10182814;
+}
+
+/* 20px для надписи на кнопке во весь экран — мало: с трёх метров это уже
+   на пределе. Поднимаю до 28px и разгоняю трекинг, как на указателях. */
+main.grid-cols-2 > button > span.text-xl {
+  font-size: 1.75rem;
+  line-height: 1.15;
+  letter-spacing: .09em;
+}
+
+main.grid-cols-2 > button > span.text-sm {
+  font-size: .9375rem;
+  font-weight: 600;
+  letter-spacing: .06em;
+}
+
+/* Клавиатурная навигация: киоск сенсорный, но фокус стоит показывать. */
+main.grid-cols-2 > button:focus-visible {
+  outline: 3px solid #16130F;
+  outline-offset: 3px;
+}

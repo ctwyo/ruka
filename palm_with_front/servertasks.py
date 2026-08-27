@@ -56,7 +56,6 @@ ATTENDANCE_PATH = Path(__file__).parent / "attendance.json"
 WEIGHTS_PATH = Path(__file__).parent / "compnet" / "weights.pth"
 SAMPLES = 150               # кадров на регистрацию (~10 сек при 15 fps)
 TEMPLATES_PER_USER = 5      # 5 шаблонов из 150 кадров = 1 шаблон каждые ~2 сек
-# LOCK_THRESHOLD = 0.75     # старое значение
 LOCK_THRESHOLD = 0.80    # порог косинусной близости: ниже — не свой
 # MARGIN = 0.05             # старое значение
 MARGIN = 0.08               # минимальный отрыв первого кандидата от второго
@@ -912,12 +911,16 @@ def _draw_overlay(frame: np.ndarray, out: dict) -> None:
     if le:
         if le.get("blocked"):
             toast(le.get("message", "Действие заблокировано"), (255, 150, 60))
-        elif le.get("changed", True):
-            kind_label = "приход" if le["kind"] == "in" else "уход"
-            toast(f"{le['name']} — {kind_label}  {le['time']}", (120, 255, 120))
-        else:
-            kind_label = "приход" if le["kind"] == "in" else "уход"
-            toast(f"{le['name']} — {kind_label} уже был в {le['time']}", (255, 200, 60))
+        # Успешное распознавание больше не подтверждаем плашкой на кадре: об
+        # этом говорит полноэкранное приветствие /greeting/. Плашка рисуется
+        # мгновенно, а приветствие проявляется ~250 мс — из-за этого зазора
+        # зелёный прямоугольник с ФИО успевал мелькнуть перед приветствием.
+        # elif le.get("changed", True):
+        #     kind_label = "приход" if le["kind"] == "in" else "уход"
+        #     toast(f"{le['name']} — {kind_label}  {le['time']}", (120, 255, 120))
+        # else:
+        #     kind_label = "приход" if le["kind"] == "in" else "уход"
+        #     toast(f"{le['name']} — {kind_label} уже был в {le['time']}", (255, 200, 60))
 
     # ─── bottom status ──
     r = out["register"]
@@ -1152,10 +1155,25 @@ _assets = STATIC / "assets"
 if _assets.exists():
     app.mount("/assets", StaticFiles(directory=str(_assets)), name="assets")
 
+# Приветственный экран (приход и уход — одна страница, режим задаётся ?kind=).
+# Отдельная папка, а не /assets: пересборка фронта чистит assets и снесла бы
+# картинки со шрифтами.
+_greeting = STATIC / "greeting"
+if _greeting.exists():
+    app.mount("/greeting", StaticFiles(directory=str(_greeting), html=True), name="greeting")
+
 
 @app.get("/")
 async def index():
     return HTMLResponse((STATIC / "index.html").read_text(encoding="utf-8"))
+
+
+@app.get("/theme-light.css")
+async def theme_light():
+    """Светлая палитра дашборда — переопределяет тёмную тему из assets/index-*.css.
+    Отдельным файлом, а не внутри assets: пересборка фронта чистит assets."""
+    return Response((STATIC / "theme-light.css").read_text(encoding="utf-8"),
+                    media_type="text/css")
 
 
 @app.get("/api/testframe/grab")

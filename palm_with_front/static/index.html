@@ -4,30 +4,45 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Учёт посещаемости</title>
-    <script type="module" crossorigin src="/assets/index-_pMfryZk.js"></script>
+    <script type="module" crossorigin src="/assets/index-_pMfryZk2.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-MEaYmMv9.css">
+    <!-- Светлая тема: переопределяет палитру собранного CSS, грузится строго после него -->
+    <link rel="stylesheet" href="/theme-light.css">
   </head>
   <body>
     <div id="root"></div>
 
-    <!-- Приветственный/прощальный оверлей: показывает high-five при приходе и heart при уходе -->
+    <!-- Приветственный/прощальный оверлей: одна страница /greeting/,
+         режим прихода или ухода выбирается параметром ?kind= -->
     <script>
       (function () {
         var OVERLAY_MS = 3000; // сколько держать страницу на экране (мс)
+
+        // Фон оверлея должен совпадать и с фоном /greeting/ (--bg), и с фоном
+        // самого дашборда — иначе в момент появления виден кадр чужого цвета.
+        var BG = "#E9ECF1";
 
         // Страницы свёрстаны под макет 1280x1080 — держим iframe в этом
         // логическом размере и масштабируем его по центру под экран.
         var BASE_W = 1280, BASE_H = 1080;
 
+        var FADE_IN_MS = 240, FADE_OUT_MS = 260;
+
+        // Проявляется и гаснет оверлей целиком — фон вместе с контентом.
+        // Раньше фон включался мгновенно, и между ним и появлением контента
+        // был виден голый цветной кадр: это и читалось как мигание.
+        // pointer-events:none — оверлей чисто декоративный и, пока он прозрачен,
+        // не должен перехватывать касания по киоску.
         var overlay = document.createElement("div");
         overlay.id = "greeting-overlay";
         overlay.style.cssText =
-          "position:fixed;inset:0;z-index:2147483647;display:none;" +
-          "align-items:center;justify-content:center;overflow:hidden;background:#ffffff";
+          "position:fixed;inset:0;z-index:2147483647;display:none;opacity:0;" +
+          "pointer-events:none;align-items:center;justify-content:center;" +
+          "overflow:hidden;background:" + BG;
         var frame = document.createElement("iframe");
         frame.style.cssText =
           "width:" + BASE_W + "px;height:" + BASE_H + "px;border:0;display:block;" +
-          "opacity:0;transition:opacity .15s ease;transform-origin:center center";
+          "transform-origin:center center";
         overlay.appendChild(frame);
         document.body.appendChild(overlay);
 
@@ -39,19 +54,29 @@
           if (overlay.style.display !== "none") fit();
         });
 
-        // Страница внутри iframe сначала рисует серую превью-заставку и
-        // только потом подменяет документ на настоящую анимацию. Пока идёт
-        // распаковка — держим iframe прозрачным (виден белый фон оверлея),
-        // и показываем ровно в тот момент, когда контент готов.
-        function contentReady() {
+        // /greeting/ сам сообщает о готовности: data-ready появляется, когда
+        // разобран шрифт и декодирована картинка. Сверяем ещё и doc.URL —
+        // сразу после присвоения src в iframe какое-то время висит ПРЕДЫДУЩИЙ
+        // документ, у него data-ready уже стоит, и без этой проверки мы
+        // показывали кадр прошлого события до подмены на новый.
+        function contentReady(href) {
           try {
             var doc = frame.contentDocument;
-            if (!doc || !doc.body) return false;
-            if (doc.getElementById("__bundler_thumbnail")) return false; // ещё превью
-            return !!doc.body.querySelector("section");                  // контент смонтирован
+            if (!doc || !doc.documentElement) return false;
+            if (doc.URL !== href) return false;
+            return doc.documentElement.hasAttribute("data-ready");
           } catch (e) {
             return true; // не должно случаться (тот же origin), но не залипаем
           }
+        }
+
+        // Команда странице проиграть анимацию — отдаём ровно в момент, когда
+        // начинаем проявлять оверлей, чтобы текст выезжал не раньше фона.
+        function play() {
+          try {
+            var el = frame.contentDocument && frame.contentDocument.documentElement;
+            if (el) el.setAttribute("data-play", "1");
+          } catch (e) {}
         }
 
         var hideTimer = null;
@@ -59,16 +84,30 @@
         function show(url) {
           var mine = ++seq;
           if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
-          frame.style.opacity = "0";
-          frame.src = url;
+
+          // Уникальный параметр на каждый показ: гарантирует настоящую
+          // перезагрузку документа (иначе повторный приход того же человека
+          // даёт тот же src и анимация не переигрывается) и делает сверку
+          // doc.URL однозначной. Картинки и шрифты берутся из кэша — их
+          // адреса не меняются.
+          var href = new URL(url, location.href);
+          href.searchParams.set("_", mine);
+          href = href.href;
+
+          overlay.style.transition = "";
+          overlay.style.opacity = "0";
           overlay.style.display = "flex";
           fit();
+          frame.src = href;
 
           var start = Date.now();
           (function waitReady() {
             if (mine !== seq) return; // пришло новое событие — этот показ отменён
-            if (contentReady() || Date.now() - start > 2500) {
-              frame.style.opacity = "1";
+            if (contentReady(href) || Date.now() - start > 2500) {
+              play();
+              overlay.style.transition = "opacity " + FADE_IN_MS + "ms ease";
+              void overlay.offsetHeight;            // применить стартовое значение до перехода
+              overlay.style.opacity = "1";
               hideTimer = setTimeout(hide, OVERLAY_MS);
             } else {
               requestAnimationFrame(waitReady);
@@ -76,10 +115,14 @@
           })();
         }
         function hide() {
-          seq++;
-          overlay.style.display = "none";
-          frame.style.opacity = "0";
-          frame.src = "about:blank";
+          var mine = ++seq;
+          overlay.style.transition = "opacity " + FADE_OUT_MS + "ms ease";
+          overlay.style.opacity = "0";
+          setTimeout(function () {
+            if (mine !== seq) return; // за время затухания пришёл новый показ
+            overlay.style.display = "none";
+            frame.src = "about:blank";
+          }, FADE_OUT_MS + 20);
         }
 
         var lastKey = null;
@@ -89,12 +132,13 @@
           var key = (le.day || "") + " " + (le.time || "") + " " + le.kind + " " + (le.name || "");
           if (key === lastKey) return; // событие транслируется каждый кадр ~4 c — показываем один раз
           lastKey = key;
-          if (le.kind === "in") {
-            show("/high-five.html?name=" + encodeURIComponent(le.name || ""));
-          } else {
-            show("/heart.html");
-          }
+          show("/greeting/?kind=" + le.kind + "&name=" + encodeURIComponent(le.name || ""));
         }
+
+        // Прогреваем кэш при старте: шрифты и картинки скачиваются один раз,
+        // и первое же событие отрисовывается без задержки на загрузку.
+        ["nunito-cyrillic.woff2", "nunito-latin.woff2", "highfive.png", "heart.png"]
+          .forEach(function (f) { fetch("/greeting/" + f).catch(function () {}); });
 
         function connect() {
           var proto = location.protocol === "https:" ? "wss:" : "ws:";
