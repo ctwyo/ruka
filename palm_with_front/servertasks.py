@@ -68,11 +68,20 @@ MIN_PALM_SIZE = 80          # мин. длина ладони wrist→middle MCP
 MAX_TILT = 1.2              # макс. наклон ладони (z-разброс / размер); больше — слишком косо
 FRAMES_PER_ATTEMPT = 15     # как часто инкрементится номер «попытки» в UI (~1 сек при 15 fps)
 HAND_LOST_FRAMES = 6        # сколько кадров без руки до сброса сканирования
-ROI_PAD = 1.3               # размер кропа относительно длины ладони (wrist→middle MCP)
+ROI_PAD = 1.3               # v1: размер кропа относительно длины ладони (wrist→middle MCP)
+# ── ROI v2: конвенция межпальцевых впадин (как в Tongji/IITD, на которых учили CompNet) ──
+ROI2_SCALE = 1.0            # сторона квадрата в долях расстояния A→B
+ROI2_OFFSET = 0.10          # отступ верхней грани квадрата вниз от линии A→B (в долях стороны)
+ROI2_MIN_DIST = 20          # мин. расстояние A→B в px, ниже — ладонь слишком мелкая
 HULL_EXPAND = 1.18          # на сколько раздуть выпуклую оболочку ладони наружу от центра
 MASK_DILATE_FRAC = 0.04     # дилатация маски в долях от размера кропа
 EMBED_DIM = 512             # размерность embedding-вектора CompNet
 CAMERA_INDEX = 0           # индекс веб-камеры (0 = первая)
+# Разрешение захвата. Чем крупнее ладонь в пикселях, тем меньше ROI
+# приходится растягивать до 128x128. Камера может отдать меньше —
+# фактическое разрешение печатается при открытии.
+CAPTURE_WIDTH = 1280
+CAPTURE_HEIGHT = 720
 JPEG_QUALITY = 80           # качество JPEG для MJPEG-стрима (1–100)
 TARGET_FPS = 15             # целевой FPS обработки кадров
 TARGET_RECT_RATIO = 0.75    # сторона квадрата-прицела = ratio × высоты кадра
@@ -173,6 +182,90 @@ def extract_palm_roi(frame: np.ndarray, landmarks):
     k = max(3, int(round(min(ch, cw) * MASK_DILATE_FRAC)))
     mask = cv2.dilate(mask, np.ones((k, k), np.uint8))
     return crop, mask
+
+
+# ── ROI v2: по межпальцевым впадинам (конвенция Tongji/IITD) ─────────────────
+def _roi_v2_geometry(frame_shape, landmarks):
+    """Геометрия ROI v2, или None если ладонь слишком мелкая.
+
+    A = середина между MCP указательного (5) и среднего (9)  — впадина 1
+    B = середина между MCP безымянного (13) и мизинца (17)   — впадина 2
+
+    center — середина A→B; angle — поворот кадра, после которого линия A→B
+    горизонтальна, а запястье оказывается СНИЗУ; dist = |AB|; side — сторона
+    квадрата ROI. Запястье (0) используется только для выбора «низа», на
+    масштаб и положение ROI оно не влияет.
+    """
+    h, w = frame_shape[:2]
+    pts = np.array([[lm.x * w, lm.y * h] for lm in landmarks], dtype=np.float32)
+
+    A = (pts[5] + pts[9]) * 0.5
+    B = (pts[13] + pts[17]) * 0.5
+    dist = float(np.linalg.norm(B - A))
+    if dist < ROI2_MIN_DIST:
+        return None
+
+    center = (A + B) * 0.5
+    dx, dy = (B - A)
+    angle = float(np.degrees(np.arctan2(dy, dx)))   # после поворота A→B горизонтальна
+
+    # Запястье должно оказаться ниже линии — иначе доворачиваем на 180°,
+    # чтобы квадрат лёг на ладонь, а не на пальцы.
+    M = cv2.getRotationMatrix2D((float(center[0]), float(center[1])), angle, 1.0)
+    wrist_y = float((M @ np.array([pts[0][0], pts[0][1], 1.0], dtype=np.float32))[1])
+    if wrist_y < float(center[1]):
+        angle += 180.0
+
+    return {"center": center, "angle": angle, "dist": dist,
+            "side": int(round(dist * ROI2_SCALE))}
+
+
+def _crop_square(img: np.ndarray, x1: int, y1: int, side: int):
+    """Квадратный кроп; если вылез за кадр — добираем края репликацией."""
+    h, w = img.shape[:2]
+    x2, y2 = x1 + side, y1 + side
+    pad_l, pad_t = max(0, -x1), max(0, -y1)
+    pad_r, pad_b = max(0, x2 - w), max(0, y2 - h)
+    crop = img[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+    if crop.size == 0:
+        return None
+    if any((pad_l, pad_r, pad_t, pad_b)):
+        crop = cv2.copyMakeBorder(crop, pad_t, pad_b, pad_l, pad_r, cv2.BORDER_REPLICATE)
+    return crop
+
+
+def extract_palm_roi_v2(frame: np.ndarray, landmarks):
+    """ROI по межпальцевым впадинам — как в базах, на которых учили CompNet.
+
+        5      9      13     17
+        *------*      *------*
+            A            B
+        A -------------- B
+                 |
+            +---------+
+            | ЛАДОНЬ  |   <- это уходит в сеть
+            +---------+
+
+    Ориентация, масштаб и положение задаются ТОЛЬКО точками 5/9/13/17
+    (v1 брал запястье 0 и средний MCP 9). Возвращает (crop_bgr, None):
+    маска не нужна — в квадрат попадает практически только кожа ладони.
+    """
+    g = _roi_v2_geometry(frame.shape, landmarks)
+    if g is None:
+        return None, None
+
+    h, w = frame.shape[:2]
+    center, side = g["center"], g["side"]
+    M = cv2.getRotationMatrix2D((float(center[0]), float(center[1])), g["angle"], 1.0)
+    rotated = cv2.warpAffine(frame, M, (w, h), flags=cv2.INTER_LINEAR,
+                             borderMode=cv2.BORDER_REPLICATE)
+
+    x1 = int(round(float(center[0]) - side / 2.0))
+    y1 = int(round(float(center[1]) + ROI2_OFFSET * side))
+    crop = _crop_square(rotated, x1, y1, side)
+    if crop is None:
+        return None, None
+    return crop, None
 
 
 def palm_quality(frame_shape, landmarks) -> tuple[bool, str]:
@@ -340,6 +433,11 @@ def scan_update(feat: np.ndarray | None, db: dict, hand_present: bool) -> dict |
 
     # лок только когда в окне достаточно качественных кадров И порог/отрыв ок
     if len(win) >= AVG_MIN_FRAMES and best_peak >= LOCK_THRESHOLD and margin_ok:
+        # запас до порога и отрыв от второго кандидата: по ним видно,
+        # держится распознавание уверенно или проходит впритык
+        print(f"[match] {best_display}: score={best_peak:.4f} "
+              f"(порог {LOCK_THRESHOLD}), второй={second_peak:.4f}, "
+              f"отрыв={best_peak - second_peak:.4f} (нужен {MARGIN})")
         sc["locked"] = {
             "name": best_display, "code": best_code, "score": round(best_peak, 4),
             "second": round(second_peak, 4) if second_peak > -1 else None,
@@ -437,10 +535,14 @@ state = {
     "latest_jpeg": None,
     "clients": set(),
     "camera_ok": False,
+    "camera_info": None,        # параметры камеры, снятые при открытии
     "save_debug": False,
     "last_debug_dir": None,
     "save_testframe": False,     # запрос сырого кадра из /testframe
     "testframe_info": None,      # результат: статистика последнего сырого кадра
+    "testframe_stats": None,     # промежуточное: статистика сырого кадра
+    "testframe_roi": None,       # промежуточное: стадии ROI (v1/v2) этого кадра
+    "testframe_dir": None,       # папка текущего снимка в screenshots/
 }
 
 
@@ -453,13 +555,33 @@ def _reset_scan():
 _rebuild_template_cache()
 
 
+SHOTS_DIR = Path(__file__).parent / "screenshots"
+
+
+def _new_shot_dir() -> Path:
+    """Отдельная папка под каждый снимок: screenshots/ГГГГММДД_ЧЧММСС[_n].
+
+    Раньше стадии перезаписывались в static/ и от снимка оставался только
+    последний. Теперь снимки копятся и их можно сравнивать между собой.
+    """
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    d = SHOTS_DIR / stamp
+    n = 2
+    while d.exists():                       # несколько снимков в одну секунду
+        d = SHOTS_DIR / f"{stamp}_{n}"
+        n += 1
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def _dump_testframe(frame: np.ndarray) -> None:
-    """Сохраняет СЫРОЙ кадр (raw/gray/clahe) в static/ и кладёт статистику в
-    state['testframe_info']. Нужно, чтобы понять: камера отдаёт монохром
-    (похоже на ИК) или обычную цветную RGB-картинку, и видны ли вены."""
-    static = Path(__file__).parent / "static"
+    """Сохраняет СЫРОЙ кадр (raw/gray/clahe) в папку снимка и кладёт
+    статистику в state['testframe_stats']. Нужно, чтобы понять: камера отдаёт
+    монохром (похоже на ИК) или обычную цветную RGB-картинку, и видны ли вены."""
+    static = _new_shot_dir()
+    state["testframe_dir"] = static
     raw = frame.copy()
-    cv2.imwrite(str(static / "testframe_raw.png"), raw)
+    cv2.imwrite(str(static / "01_raw.png"), raw)
 
     if raw.ndim == 3 and raw.shape[2] == 3:
         channels = 3
@@ -474,11 +596,11 @@ def _dump_testframe(frame: np.ndarray) -> None:
         chan_diff = 0.0
         gray = raw if raw.ndim == 2 else raw[..., 0]
 
-    cv2.imwrite(str(static / "testframe_gray.png"), gray)
+    cv2.imwrite(str(static / "02_gray.png"), gray)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
-    cv2.imwrite(str(static / "testframe_clahe.png"), clahe)
+    cv2.imwrite(str(static / "03_clahe.png"), clahe)
 
-    state["testframe_info"] = {
+    state["testframe_stats"] = {
         "shape": list(raw.shape),
         "channels": channels,
         "dtype": str(raw.dtype),
@@ -490,16 +612,144 @@ def _dump_testframe(frame: np.ndarray) -> None:
     }
 
 
+def _roi_quality_stats(small: np.ndarray | None) -> dict:
+    """Замеры по 128x128, т.е. ровно по тому, что получает CompNet.
+
+    Считаем на входе сети, а не на исходном кропе, чтобы числа были
+    сравнимы между снимками при разном размере ладони в кадре.
+    """
+    if small is None or small.size == 0:
+        return {}
+    g = small.astype(np.float32)
+    n = float(g.size)
+    return {
+        # средняя яркость: ~90..170 нормально, край диапазона — темно/пересвет
+        "mean": round(float(g.mean()), 1),
+        # разброс яркости: линии ладони видны примерно от 20 и выше
+        "contrast": round(float(g.std()), 1),
+        # выбитые в ноль / в белое пиксели: там информации уже нет
+        "clip_dark_pct": round(float((small == 0).sum()) / n * 100, 1),
+        "clip_bright_pct": round(float((small == 255).sum()) / n * 100, 1),
+        # резкость: дисперсия лапласиана, чем больше — тем чётче линии
+        "focus": round(float(cv2.Laplacian(small, cv2.CV_64F).var()), 1),
+        # «мыло или нет» — сравнение картинки с её же размытой копией.
+        # Абсолютные меры резкости зависят и от контраста, и от того, сколько
+        # в объекте мелкой фактуры: у гладкой ладони её на порядки меньше, чем
+        # у шумного поля, поэтому единого эталона не существует. А вот падение
+        # лапласиана после дополнительного размытия от фактуры почти не зависит:
+        # у резкой картинки есть что терять (отношение заметно больше 1),
+        # у уже размытой терять нечего (отношение около 1).
+        "sharpness": _blur_ratio(small),
+    }
+
+
+def _blur_ratio(img: np.ndarray) -> float:
+    lap = float(cv2.Laplacian(img, cv2.CV_64F).var())
+    soft = cv2.GaussianBlur(img, (0, 0), 1.5)
+    lap_soft = float(cv2.Laplacian(soft, cv2.CV_64F).var())
+    return round(lap / (lap_soft + 1e-6), 2)
+
+
+def _dump_testframe_roi(frame: np.ndarray, hand) -> None:
+    """Стадии ROI того же кадра: v1 (сейчас в работе) и v2 (кандидат).
+
+    Для каждого варианта — сам кроп, картинка 128×128 в том виде, в каком её
+    получает CompNet, и итоговый нормализованный тензор. Кадр приходит сюда
+    ещё без скелета и оверлея, так что стадии честные.
+    """
+    static = state["testframe_dir"]      # папка этого снимка, уже создана
+
+    def _save(name: str, img) -> None:
+        if img is not None and getattr(img, "size", 0):
+            cv2.imwrite(str(static / name), img)
+
+    def _net_input(roi, mask):
+        """(128×128 как видит сеть, нормализованный тензор для показа)."""
+        if roi is None or roi.size == 0:
+            return None, None
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if roi.ndim == 3 else roi
+        small = cv2.resize(gray, (128, 128), interpolation=cv2.INTER_AREA)
+        if mask is not None:
+            m = cv2.resize(mask, (128, 128), interpolation=cv2.INTER_NEAREST)
+            small = cv2.bitwise_and(small, small, mask=m)
+        # тензор ~N(0,1) — растягиваем в 0..255, иначе глазами не увидеть
+        t = preprocess_palm(roi, mask=mask, size=128).squeeze().numpy()
+        lo, hi = float(t.min()), float(t.max())
+        norm = ((t - lo) / (hi - lo + 1e-6) * 255).clip(0, 255).astype(np.uint8)
+        return small, norm
+
+    roi1, mask1 = extract_palm_roi(frame, hand)
+    roi2, _ = extract_palm_roi_v2(frame, hand)
+    small1, norm1 = _net_input(roi1, mask1)
+    small2, norm2 = _net_input(roi2, None)
+
+    _save("04_v1_crop.png", roi1)
+    _save("05_v1_mask.png", mask1)
+    _save("06_v1_128.png", small1)
+    _save("07_v1_norm.png", norm1)
+    _save("08_v2_crop.png", roi2)
+    _save("09_v2_128.png", small2)
+    _save("10_v2_norm.png", norm2)
+
+    h, w = frame.shape[:2]
+    pts = np.array([[lm.x * w, lm.y * h] for lm in hand], dtype=np.float32)
+    g = _roi_v2_geometry(frame.shape, hand)
+    q_ok, q_reason = palm_quality(frame.shape, hand)
+
+    state["testframe_roi"] = {
+        "quality": q_reason,
+        "quality_ok": bool(q_ok),
+        # v1: масштаб от запястье→средний MCP
+        "v1_side_px": int(round(float(np.linalg.norm(pts[9] - pts[0])) * ROI_PAD)),
+        # v2: масштаб от впадины к впадине
+        "v2_side_px": (g["side"] if g else 0),
+        "v2_angle_deg": (round(g["angle"], 1) if g else None),
+        "v2_valley_dist_px": (round(g["dist"], 1) if g else None),
+        # качество именно того участка, который уходит в сеть
+        "v2_quality": _roi_quality_stats(small2),
+        "v1_quality": _roi_quality_stats(small1),
+    }
+
+
+def _finish_testframe() -> None:
+    """Собирает единый результат /testframe (с рукой или без) и гасит флаг."""
+    stats = state.get("testframe_stats")
+    shot_dir = state.get("testframe_dir")
+    if stats is None:
+        state["testframe_info"] = {"error": "не удалось снять кадр"}
+    else:
+        info = {**stats,
+                "shot": (shot_dir.name if shot_dir else None),
+                "roi": state.get("testframe_roi"),
+                "camera": state.get("camera_info")}
+        state["testframe_info"] = info
+        # те же цифры рядом с картинками — чтобы потом разбирать снимки
+        # пачкой, не переснимая и не листая страницу
+        if shot_dir is not None:
+            try:
+                (shot_dir / "info.json").write_text(
+                    json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception as e:
+                print(f"[testframe] не удалось записать info.json: {e}")
+    state["save_testframe"] = False
+
+
 # ── per-frame processing (runs in executor thread) ───────────────────────────
 def handle_frame(frame: np.ndarray) -> tuple[bytes | None, dict]:
-    # frame = cv2.flip(frame, 1)  # mirror for selfie view (disabled: keep real hand direction)
+    frame = cv2.flip(frame, 1)  # mirror for selfie view: hand moves the same way on screen
 
-    # запрос сырого кадра из /testframe — снимаем ДО любой обработки/отрисовки
+    # запрос из /testframe — сырые стадии снимаем ДО любой обработки/отрисовки.
+    # Флаг здесь НЕ гасим: стадии ROI снимаются ниже, когда найдены landmarks,
+    # а итог собирается в конце кадра (_finish_testframe).
     if state.get("save_testframe"):
+        state["testframe_stats"] = None
+        state["testframe_roi"] = None
         try:
             _dump_testframe(frame)
-        finally:
+        except Exception as e:
+            print(f"[testframe] raw dump failed: {e}")
             state["save_testframe"] = False
+            state["testframe_info"] = {"error": str(e)}
 
     out: dict = {
         "hand": False, "match": None, "register": None,
@@ -636,10 +886,23 @@ def handle_frame(frame: np.ndarray) -> tuple[bytes | None, dict]:
         q_ok, q_reason = palm_quality(frame.shape, hand)
         out["hand_quality"] = q_reason
         if q_ok:
-            roi, palm_mask = extract_palm_roi(frame, hand)
-            feat = compute_embedding(roi, mask=palm_mask, debug_dir=debug_dir)
+            # ROI по межпальцевым впадинам — та же конвенция, что в Tongji/IITD,
+            # на которых учили CompNet. Маска не передаётся: в квадрат попадает
+            # практически только кожа ладони, а жёсткий контур маски сеть
+            # принимала бы за линию ладони.
+            roi, _ = extract_palm_roi_v2(frame, hand)
+            feat = compute_embedding(roi, mask=None, debug_dir=debug_dir)
         else:
             feat = None
+
+        # запрос из /testframe — кадр здесь ещё без скелета и оверлея,
+        # поэтому кропы честно совпадают с тем, что ушло бы в CompNet
+        if state.get("save_testframe"):
+            try:
+                _dump_testframe_roi(frame, hand)
+            except Exception as e:
+                print(f"[testframe] roi dump failed: {e}")
+                state["testframe_roi"] = None
 
         # Переводим нормализованные координаты всех 21 точек в физические пиксели кадра
         pixel_pts = [(int(lm.x * w_), int(lm.y * h_)) for lm in hand]
@@ -761,6 +1024,10 @@ def handle_frame(frame: np.ndarray) -> tuple[bytes | None, dict]:
         out["last_event"] = {k: v for k, v in le.items() if k != "ts"}
     _today = datetime.now().strftime("%Y-%m-%d")
     out["attendance_today"] = [e for e in state["attendance"] if e.get("date") == _today]
+
+    # /testframe: кадр обработан целиком — публикуем единый результат
+    if state.get("save_testframe"):
+        _finish_testframe()
 
     _draw_overlay(frame, out)
 
@@ -951,15 +1218,54 @@ def _draw_overlay(frame: np.ndarray, out: dict) -> None:
 
 
 # ── camera loop ──────────────────────────────────────────────────────────────
+def _probe_camera(cap: cv2.VideoCapture, w: int, h: int) -> None:
+    """Снимает параметры камеры один раз при открытии, кладёт в state.
+
+    Драйверы отдают -1 или 0 для того, чего не умеют, поэтому значения
+    показываем как есть — важен сам факт, поддерживает камера фокус или нет.
+    """
+    props = {
+        "fps": cv2.CAP_PROP_FPS,
+        "autofocus": cv2.CAP_PROP_AUTOFOCUS,
+        "focus": cv2.CAP_PROP_FOCUS,
+        "auto_exposure": cv2.CAP_PROP_AUTO_EXPOSURE,
+        "exposure": cv2.CAP_PROP_EXPOSURE,
+        "gain": cv2.CAP_PROP_GAIN,
+        "brightness": cv2.CAP_PROP_BRIGHTNESS,
+        "contrast": cv2.CAP_PROP_CONTRAST,
+        "sharpness": cv2.CAP_PROP_SHARPNESS,
+    }
+    info = {"width": w, "height": h}
+    for name, prop in props.items():
+        try:
+            info[name] = round(float(cap.get(prop)), 3)
+        except Exception:
+            info[name] = None
+    state["camera_info"] = info
+    print("[camera] параметры: " + ", ".join(f"{k}={v}" for k, v in info.items()))
+    if info.get("autofocus", -1) in (-1, 0):
+        print("[camera] автофокус недоступен или выключен — если ладонь мылит, "
+              "камера скорее всего не умеет фокусироваться так близко")
+
+
 def _try_open_camera(index: int) -> cv2.VideoCapture | None:
     """Try DSHOW first (Windows-friendly), then default backend."""
     for backend in (cv2.CAP_DSHOW, cv2.CAP_ANY):
         cap = cv2.VideoCapture(index, backend)
         if cap.isOpened():
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            ok, _ = cap.read()
+            # MJPG до выставления размера: без него DSHOW отдаёт HD на ~10 fps
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
+            ok, frame = cap.read()
             if ok:
+                h, w = frame.shape[:2]
+                print(f"[camera] запрошено {CAPTURE_WIDTH}x{CAPTURE_HEIGHT}, "
+                      f"камера отдаёт {w}x{h}")
+                if w < CAPTURE_WIDTH:
+                    print("[camera] камера не поддерживает запрошенное разрешение — "
+                          "ладонь в кадре будет мельче, ROI придётся растягивать")
+                _probe_camera(cap, w, h)
                 return cap
             cap.release()
     return None
@@ -1178,73 +1484,161 @@ async def theme_light():
 
 @app.get("/api/testframe/grab")
 async def testframe_grab():
-    """Ловит СЫРОЙ кадр (до обработки) и возвращает статистику + картинки в base64."""
+    """Снимает один кадр и отдаёт ВСЕ его стадии: сырой кадр и обработки."""
     state["testframe_info"] = None
     state["save_testframe"] = True
-    for _ in range(80):                       # ждём захвата до ~4 сек
+    for _ in range(80):                       # ждём обработки кадра до ~4 сек
         if state["testframe_info"] is not None:
             break
         await asyncio.sleep(0.05)
     info = state["testframe_info"]
     if info is None:
+        state["save_testframe"] = False
         return {"ok": False, "error": "камера не отдаёт кадры (не открыта?)"}
+    if info.get("error"):
+        return {"ok": False, "error": info["error"]}
+
+    shot_dir = state.get("testframe_dir")
 
     def b64(name: str) -> str:
-        p = STATIC / name
+        if shot_dir is None:
+            return ""
+        p = shot_dir / name
         return base64.b64encode(p.read_bytes()).decode() if p.exists() else ""
 
     return {
         "ok": True,
         "info": info,
-        "raw": b64("testframe_raw.png"),
-        "gray": b64("testframe_gray.png"),
-        "clahe": b64("testframe_clahe.png"),
+        # сырой кадр и его общие представления
+        "raw": b64("01_raw.png"),
+        "gray": b64("02_gray.png"),
+        "clahe": b64("03_clahe.png"),
+        # ROI v1 — то, что сейчас реально уходит в CompNet
+        "v1_crop": b64("04_v1_crop.png"),
+        "v1_mask": b64("05_v1_mask.png"),
+        "v1_128": b64("06_v1_128.png"),
+        "v1_norm": b64("07_v1_norm.png"),
+        # ROI v2 — кандидат по межпальцевым впадинам
+        "v2_crop": b64("08_v2_crop.png"),
+        "v2_128": b64("09_v2_128.png"),
+        "v2_norm": b64("10_v2_norm.png"),
     }
 
 
 @app.get("/testframe")
 async def testframe():
-    """Страница с ОНЛАЙН-видео и кнопкой «Сделать снимок»."""
+    """Одна страница: онлайн-видео + все стадии обработки снятого кадра."""
     html = """<!doctype html><meta charset="utf-8">
 <body style="font-family:sans-serif;background:#111;color:#eee;padding:16px;line-height:1.5">
-  <h2>Тестовый кадр</h2>
-  <div>Онлайн с камеры — наведи ладонь:</div>
-  <img src="/stream" style="max-width:520px;border:1px solid #444;border-radius:8px;margin:8px 0">
+  <h2>Тестовый кадр — все стадии</h2>
+  <div>Наведи ладонь и жми «Снимок». Чтобы проверить стабильность кропа,
+       сними одну и ту же руку ~10 раз и сравни колонку
+       <b>128×128</b> у v2 — она должна повторяться.</div>
+  <img src="/stream" style="max-width:420px;border:1px solid #444;border-radius:8px;margin:8px 0">
   <div>
     <button onclick="grab()" style="font-size:18px;padding:10px 22px;border-radius:999px;
-      border:0;background:#2d7;cursor:pointer;font-weight:700">📸 Сделать снимок</button>
+      border:0;background:#2d7;cursor:pointer;font-weight:700">Снимок</button>
+    <button onclick="clearAll()" style="font-size:14px;padding:10px 18px;border-radius:999px;
+      border:0;background:#555;color:#eee;cursor:pointer;margin-left:8px">Очистить</button>
     <span id="status" style="margin-left:12px;color:#9cf"></span>
+    <span id="count" style="margin-left:12px;color:#888"></span>
   </div>
-  <div id="result" style="margin-top:16px"></div>
+  <div id="shots" style="margin-top:16px"></div>
   <script>
+    let n = 0;
     async function grab() {
       const s = document.getElementById('status');
-      s.textContent = 'снимаю…';
+      s.textContent = 'снимаю...';
       try {
         const r = await fetch('/api/testframe/grab');
         const d = await r.json();
         if (!d.ok) { s.textContent = 'ошибка: ' + (d.error || ''); return; }
         s.textContent = '';
-        const verdict = d.info.looks_grayscale
-          ? 'похоже на МОНОХРОМ / ИК'
-          : 'похоже на обычную ЦВЕТНУЮ RGB-картинку';
-        document.getElementById('result').innerHTML =
-          '<h3>' + verdict + '</h3>' +
-          '<p><b>channel_diff ≈ 0</b> и <b>looks_grayscale=true</b> → монохром (характерно для ИК). '
-          + 'Большой channel_diff → цветная RGB, «ИК-инвариантности» нет.</p>' +
-          '<pre style="background:#000;padding:10px;border-radius:8px">'
-          + JSON.stringify(d.info, null, 2) + '</pre>' +
-          '<div style="display:flex;gap:14px;flex-wrap:wrap">' +
-            card('RAW (как приходит с камеры)', d.raw) +
-            card('GRAY', d.gray) +
-            card('CLAHE (тут проступят вены, если камера их видит)', d.clahe) +
-          '</div>';
+        n += 1;
+        document.getElementById('count').textContent = 'снимков: ' + n;
+        document.getElementById('shots').prepend(render(d, n));
       } catch (e) { s.textContent = 'ошибка: ' + e; }
     }
-    function card(title, b64) {
-      return '<div><div>' + title + '</div>' +
-        '<img src="data:image/png;base64,' + b64 +
-        '" style="max-width:440px;border:1px solid #444"></div>';
+    function clearAll() {
+      n = 0;
+      document.getElementById('shots').innerHTML = '';
+      document.getElementById('count').textContent = '';
+    }
+    function card(title, b64, wide) {
+      if (!b64) return '';
+      const w = wide ? 300 : 150;
+      return '<div><div style="font-size:12px;color:#aaa">' + title + '</div>' +
+        '<img src="data:image/png;base64,' + b64 + '" style="width:' + w +
+        'px;image-rendering:pixelated;border:1px solid #444"></div>';
+    }
+    function quality(q) {
+      if (!q || q.mean === undefined) return '';
+      const bad = [];
+      if (q.contrast < 20) bad.push('низкий контраст — линии ладони почти не видны');
+      if (q.sharpness < 2.0) bad.push('размыто — не в фокусе или движение');
+      if (q.clip_bright_pct > 1) bad.push('пересвет ' + q.clip_bright_pct + '% — лампа бьёт в ладонь');
+      if (q.clip_dark_pct > 1) bad.push('провал в чёрное ' + q.clip_dark_pct + '%');
+      if (q.mean < 70) bad.push('темно');
+      if (q.mean > 190) bad.push('слишком светло');
+      const verdict = bad.length
+        ? '<span style="color:#e77">' + bad.join('; ') + '</span>'
+        : '<span style="color:#7d7">картинка для сети нормальная</span>';
+      return '<div style="color:#888;font-size:13px">качество ROI: ' +
+        'яркость ' + q.mean + ' &middot; контраст ' + q.contrast +
+        ' &middot; резкость x' + q.sharpness + ' (лапласиан ' + q.focus + ')' +
+        ' &middot; пересвет ' + q.clip_bright_pct + '%' +
+        ' &middot; чёрное ' + q.clip_dark_pct + '% &rarr; ' + verdict + '</div>';
+    }
+    function row(label, cards) {
+      const body = cards.filter(Boolean).join('');
+      if (!body) return '';
+      return '<div style="margin:10px 0">' +
+        '<div style="color:#9cf;font-weight:700;margin-bottom:4px">' + label + '</div>' +
+        '<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start">' +
+        body + '</div></div>';
+    }
+    function render(d, idx) {
+      const i = d.info, roi = i.roi;
+      const box = document.createElement('div');
+      box.style.cssText = 'border-bottom:1px solid #333;padding-bottom:16px;margin-bottom:16px';
+      const verdict = i.looks_grayscale
+        ? 'похоже на МОНОХРОМ / ИК' : 'похоже на обычную ЦВЕТНУЮ RGB-картинку';
+      let geom;
+      if (!roi) {
+        geom = '<div style="color:#e77">рука в кадре не найдена - стадии ROI недоступны</div>';
+      } else {
+        const warn = (roi.v2_side_px && roi.v2_side_px < 128)
+          ? ' <span style="color:#e77">(меньше 128: кроп растягивается, держи руку ближе)</span>'
+          : '';
+        geom = '<div style="color:#888;font-size:13px">' +
+          'качество кадра: <b>' + roi.quality + '</b> &middot; ' +
+          'v1 сторона ' + roi.v1_side_px + 'px &middot; ' +
+          'v2 сторона ' + roi.v2_side_px + 'px' + warn + ' &middot; ' +
+          'v2 угол ' + roi.v2_angle_deg + '&deg; &middot; ' +
+          'впадины ' + roi.v2_valley_dist_px + 'px</div>' + quality(roi.v2_quality);
+      }
+      box.innerHTML =
+        '<h3 style="margin:0">Снимок #' + idx + ' - ' + verdict + '</h3>' +
+        '<div style="color:#777;font-size:12px">папка: screenshots/' +
+        (i.shot || '?') + '</div>' + geom +
+        row('1. Кадр с камеры', [
+          card('RAW (как пришёл)', d.raw, true),
+          card('GRAY', d.gray, true),
+          card('CLAHE - только диагностика ИК, в сеть НЕ идёт', d.clahe, true)]) +
+        row('2. ROI v1 - сейчас в работе (запястье, средний MCP)', [
+          card('кроп', d.v1_crop),
+          card('маска ладони', d.v1_mask),
+          card('128x128 - вход сети', d.v1_128),
+          card('после нормализации', d.v1_norm)]) +
+        row('3. ROI v2 - кандидат (по межпальцевым впадинам)', [
+          card('кроп', d.v2_crop),
+          card('128x128 - вход сети', d.v2_128),
+          card('после нормализации', d.v2_norm)]) +
+        '<details style="margin-top:8px"><summary style="cursor:pointer;color:#888">' +
+        'статистика кадра (JSON)</summary>' +
+        '<pre style="background:#000;padding:10px;border-radius:8px;overflow:auto">' +
+        JSON.stringify(i, null, 2) + '</pre></details>';
+      return box;
     }
   </script>
 </body>"""

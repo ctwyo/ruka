@@ -153,17 +153,20 @@ def preprocess_palm(roi_bgr: np.ndarray, mask: np.ndarray | None = None,
     if debug_dir is not None:
         cv2.imwrite(os.path.join(debug_dir, "2_grayscale.png"), gray)
 
-    # ===== CLAHE: local contrast boost for palm lines =====
-    # Adaptive histogram equalization makes the palm creases pop out even under
-    # uneven webcam lighting. clipLimit raise -> punchier but noisier;
-    # tileGridSize smaller -> more local. (2.0, 8x8) is the palm-print standard.
-    global _CLAHE
-    if _CLAHE is None:
-        _CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    gray = _CLAHE.apply(gray)
+    # ===== CLAHE: DISABLED =====
+    # Upstream (xuliangcs/compnet, models/dataset.py) trains with only
+    # convert('L') -> Resize(128) -> ToTensor -> NormSingleROI — no CLAHE, no
+    # histogram equalization. weights.pth (Tongji, 600 classes) therefore never
+    # saw contrast-boosted input, and CLAHE also amplifies sensor noise and
+    # lighting texture. Re-enable only if a side-by-side genuine/impostor
+    # distance test on this camera shows it actually helps.
+    # global _CLAHE
+    # if _CLAHE is None:
+    #     _CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    # gray = _CLAHE.apply(gray)
+    # if debug_dir is not None:
+    #     cv2.imwrite(os.path.join(debug_dir, "3_clahe.png"), gray)
     # ===== /CLAHE =====
-    if debug_dir is not None:
-        cv2.imwrite(os.path.join(debug_dir, "3_clahe.png"), gray)
 
     gray = cv2.resize(gray, (size, size), interpolation=cv2.INTER_AREA)
     if debug_dir is not None:

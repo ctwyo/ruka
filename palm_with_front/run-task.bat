@@ -6,7 +6,11 @@ rem ── health check: does the venv's python actually run? ──────
 "%VENV%\Scripts\python.exe" -c "import sys" >nul 2>&1
 if not errorlevel 1 goto :run
 
-echo [venv] broken (base Python moved, reinstalled, or project copied) - repairing...
+if exist "%VENV%\pyvenv.cfg" (
+    echo [venv] broken ^(base Python moved, reinstalled, or project copied^) - repairing...
+) else (
+    echo [venv] missing - creating from scratch...
+)
 
 rem ── locate a Python 3.14 base interpreter, trying several sources ──────
 rem prints "<dir>|<major.minor.patch>" only if the interpreter is 3.14.x
@@ -30,6 +34,26 @@ if not defined PYHOME (
 )
 
 echo [venv] found Python %PYVER% at: !PYHOME!
+
+rem ── no venv at all: create it and install requirements ─────────────────
+if not exist "%VENV%\pyvenv.cfg" (
+    "!PYHOME!\python.exe" -m venv "%VENV%"
+    if errorlevel 1 (
+        echo [venv] could not create the venv.
+        pause
+        exit /b 1
+    )
+    echo [venv] installing requirements - this takes a few minutes...
+    "%VENV%\Scripts\python.exe" -m pip install -r requirements.txt
+    if errorlevel 1 (
+        echo [venv] pip install failed - see the output above.
+        pause
+        exit /b 1
+    )
+    goto :verify
+)
+
+rem ── venv exists but points at a moved interpreter: rewrite pyvenv.cfg ──
 (
     echo home = !PYHOME!
     echo include-system-site-packages = false
@@ -38,6 +62,7 @@ echo [venv] found Python %PYVER% at: !PYHOME!
     echo command = !PYHOME!\python.exe -m venv %CD%\%VENV%
 ) > "%VENV%\pyvenv.cfg"
 
+:verify
 rem verify the repair worked
 "%VENV%\Scripts\python.exe" -c "import sys" >nul 2>&1
 if errorlevel 1 (
