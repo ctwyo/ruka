@@ -65,13 +65,23 @@ AVG_MIN_FRAMES = 6          # сколько КАЧЕСТВЕННЫХ кадро
 AVG_WINDOW = 12             # скользящее окно: усредняем ПОСЛЕДНИЕ N кадров (старые забываем)
 # ── контроль качества входного кадра (отбраковка до эмбеддинга) ──
 MIN_PALM_SIZE = 80          # мин. длина ладони wrist→middle MCP в px; меньше — далеко/мелко
+REF_WIDTH = 1280            # ширина кадра, под которую подобраны пиксельные пороги ниже:
+                            # при другом разрешении они пересчитываются пропорционально,
+                            # иначе на 1080p та же ладонь «проходит» с большего расстояния
 MAX_TILT = 1.2              # макс. наклон ладони (z-разброс / размер); больше — слишком косо
 FRAMES_PER_ATTEMPT = 15     # как часто инкрементится номер «попытки» в UI (~1 сек при 15 fps)
 HAND_LOST_FRAMES = 6        # сколько кадров без руки до сброса сканирования
 ROI_PAD = 1.3               # v1: размер кропа относительно длины ладони (wrist→middle MCP)
 # ── ROI v2: конвенция межпальцевых впадин (как в Tongji/IITD, на которых учили CompNet) ──
-ROI2_SCALE = 1.0            # сторона квадрата в долях расстояния A→B
-ROI2_OFFSET = 0.10          # отступ верхней грани квадрата вниз от линии A→B (в долях стороны)
+# Подобрано перебором по снимкам из screenshots/: со старыми 1.0 / 0.10 квадрат
+# ложился на гладкий участок сразу под пальцами, куда главные линии ладони не
+# попадают — в сеть уходило ровное серое пятно (контраст 4.9 на снимке
+# 20260904_093922 при ориентире «линии видны от 20»). Смещение вниз и увеличение
+# стороны выводят квадрат на центр ладони: средний контраст по четырём снимкам
+# 7.7 → 17. Дальше (1.6 / 0.50) контраст растёт уже за счёт чёрного фона,
+# заползающего в угол кропа, — это не линии, а край ладони.
+ROI2_SCALE = 1.4            # сторона квадрата в долях расстояния A→B
+ROI2_OFFSET = 0.45          # отступ верхней грани квадрата вниз от линии A→B (в долях стороны)
 ROI2_MIN_DIST = 20          # мин. расстояние A→B в px, ниже — ладонь слишком мелкая
 HULL_EXPAND = 1.18          # на сколько раздуть выпуклую оболочку ладони наружу от центра
 MASK_DILATE_FRAC = 0.04     # дилатация маски в долях от размера кропа
@@ -80,11 +90,27 @@ CAMERA_INDEX = 0           # индекс веб-камеры (0 = первая)
 # Разрешение захвата. Чем крупнее ладонь в пикселях, тем меньше ROI
 # приходится растягивать до 128x128. Камера может отдать меньше —
 # фактическое разрешение печатается при открытии.
-CAPTURE_WIDTH = 1280
-CAPTURE_HEIGHT = 720
+CAPTURE_WIDTH = 640
+CAPTURE_HEIGHT = 480
 JPEG_QUALITY = 80           # качество JPEG для MJPEG-стрима (1–100)
 TARGET_FPS = 15             # целевой FPS обработки кадров
+# Полное разрешение нужно ТОЛЬКО кропу ладони, который уходит в CompNet.
+# Детекция кисти, отрисовка оверлея и JPEG для стрима на 1080p стоят втрое
+# дороже, чем на 720p, и ничего не добавляют: MediaPipe всё равно ужимает
+# кадр внутри себя, а оверлей рисуется поверх. Поэтому детекция и показ идут
+# по уменьшенной копии, а ROI режется из исходного кадра.
+# 960 = ровно половина 1920: у INTER_AREA для деления на целое есть быстрый
+# путь, и уменьшение стоит 0.8 мс против 7.9 мс на 1280 (нецелое 2/3).
+WORK_WIDTH = 960            # ширина кадра для детекции/показа (0 — не уменьшать)
+PERF_LOG_EVERY = 30         # печатать тайминги стадий раз в N кадров (0 — молчать)
 TARGET_RECT_RATIO = 0.75    # сторона квадрата-прицела = ratio × высоты кадра
+# Показывать ли кадр зеркально («селфи-режим»). Выключено: в зеркале лево и
+# право меняются местами, и подсказки вроде «сдвиньте ладонь» читаются
+# наоборот. На само распознавание не влияет — см. handle_frame.
+MIRROR_PREVIEW = False
+# Общий множитель размеров текста на кадре. Сами размеры считаются в долях
+# высоты кадра (см. _draw_overlay) — крутить нужно только это число.
+OVERLAY_FONT_SCALE = 1.0
 
 # ── MediaPipe ────────────────────────────────────────────────────────────────
 # mp_hands = mp.solutions.hands
@@ -202,7 +228,7 @@ def _roi_v2_geometry(frame_shape, landmarks):
     A = (pts[5] + pts[9]) * 0.5
     B = (pts[13] + pts[17]) * 0.5
     dist = float(np.linalg.norm(B - A))
-    if dist < ROI2_MIN_DIST:
+    if dist < ROI2_MIN_DIST * w / REF_WIDTH:
         return None
 
     center = (A + B) * 0.5
@@ -254,16 +280,24 @@ def extract_palm_roi_v2(frame: np.ndarray, landmarks):
     if g is None:
         return None, None
 
-    h, w = frame.shape[:2]
     center, side = g["center"], g["side"]
-    M = cv2.getRotationMatrix2D((float(center[0]), float(center[1])), g["angle"], 1.0)
-    rotated = cv2.warpAffine(frame, M, (w, h), flags=cv2.INTER_LINEAR,
-                             borderMode=cv2.BORDER_REPLICATE)
-
+    if side < 1:
+        return None, None
     x1 = int(round(float(center[0]) - side / 2.0))
     y1 = int(round(float(center[1]) + ROI2_OFFSET * side))
-    crop = _crop_square(rotated, x1, y1, side)
-    if crop is None:
+
+    # Поворот считаем СРАЗУ в координатах кропа: сдвигаем матрицу так, чтобы
+    # левый верхний угол квадрата попал в (0,0), и просим warpAffine отрисовать
+    # только side×side. Раньше поворачивался весь кадр целиком — на 1080p это
+    # два мегапикселя работы ради квадратика в пару сотен пикселей.
+    # Пиксели внутри кадра выбираются той же интерполяцией, что и раньше,
+    # поэтому эмбеддинги (а значит и база) остаются сопоставимыми.
+    M = cv2.getRotationMatrix2D((float(center[0]), float(center[1])), g["angle"], 1.0)
+    M[0, 2] -= x1
+    M[1, 2] -= y1
+    crop = cv2.warpAffine(frame, M, (side, side), flags=cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_REPLICATE)
+    if crop is None or crop.size == 0:
         return None, None
     return crop, None
 
@@ -280,7 +314,7 @@ def palm_quality(frame_shape, landmarks) -> tuple[bool, str]:
     palm_size = float(np.linalg.norm(pts[9] - pts[0]))   # wrist(0) → middle MCP(9)
 
     # 1) слишком маленькая / далеко от камеры
-    if palm_size < MIN_PALM_SIZE:
+    if palm_size < MIN_PALM_SIZE * w / REF_WIDTH:
         return False, "ближе"
 
     # 2) частично за кадром: опорные точки ладони должны быть внутри кадра
@@ -734,9 +768,82 @@ def _finish_testframe() -> None:
     state["save_testframe"] = False
 
 
+# Скелет кисти: связи и цвет (BGR) по пальцам.
+FINGERS_DATA = {
+    "thumb": {  # Большой палец
+        "connections": [(0, 1), (1, 2), (2, 3), (3, 4)],
+        "color": (255, 0, 255),  # Пурпурный
+    },
+    "index": {  # Указательный
+        "connections": [(0, 5), (5, 6), (6, 7), (7, 8)],
+        "color": (255, 0, 0),    # Синий
+    },
+    "middle": {  # Средний
+        "connections": [(5, 9), (9, 10), (10, 11), (11, 12)],
+        "color": (0, 255, 0),    # Зеленый
+    },
+    "ring": {   # Безымянный
+        "connections": [(9, 13), (13, 14), (14, 15), (15, 16)],
+        "color": (0, 255, 255),  # Желтый
+    },
+    "pinky": {  # Мизинец и основание ладони
+        "connections": [(13, 17), (0, 17), (17, 18), (18, 19), (19, 20)],
+        "color": (0, 165, 255),  # Оранжевый
+    },
+}
+
+
+class _Stage:
+    """Секундомер по стадиям кадра — чтобы лаг искать по цифрам, а не на глаз.
+
+    Пишет в лог раз в PERF_LOG_EVERY кадров; при 0 не делает ничего, кроме
+    пары вызовов perf_counter.
+    """
+
+    _count = 0
+
+    def __init__(self) -> None:
+        self.t0 = time.perf_counter()
+        self.prev = self.t0
+        self.parts: list[str] = []
+
+    def mark(self, name: str) -> None:
+        if not PERF_LOG_EVERY:
+            return
+        now = time.perf_counter()
+        self.parts.append(f"{name} {(now - self.prev) * 1000:.0f}")
+        self.prev = now
+
+    def done(self, shape) -> None:
+        if not PERF_LOG_EVERY:
+            return
+        _Stage._count += 1
+        if _Stage._count % PERF_LOG_EVERY:
+            return
+        total = (time.perf_counter() - self.t0) * 1000
+        print(f"[perf] {shape[1]}x{shape[0]} итого {total:.0f} мс "
+              f"({1000 / total:.1f} fps макс) — " + ", ".join(self.parts))
+
+
 # ── per-frame processing (runs in executor thread) ───────────────────────────
 def handle_frame(frame: np.ndarray) -> tuple[bytes | None, dict]:
-    frame = cv2.flip(frame, 1)  # mirror for selfie view: hand moves the same way on screen
+    t = _Stage()
+
+    # Распознавание всегда идёт по зеркальной копии кадра. Это не выбор
+    # «как удобнее смотреть», а совместимость: ROI вырезается из этого кадра,
+    # и все шаблоны в palms.json посчитаны именно по зеркальной картинке.
+    # Показываем кадр человеку отдельно — ниже, ближе к отрисовке.
+    full = cv2.flip(frame, 1)
+
+    # Дальше всё, кроме кропа ладони, работает по уменьшенной копии: детекция
+    # кисти, скелет, оверлей и JPEG. На кроп это не влияет — он режется из
+    # full, — а стоят эти стадии ровно пропорционально площади кадра.
+    if WORK_WIDTH and full.shape[1] > WORK_WIDTH:
+        work_h = int(round(full.shape[0] * WORK_WIDTH / full.shape[1]))
+        frame = cv2.resize(full, (WORK_WIDTH, work_h), interpolation=cv2.INTER_AREA)
+    else:
+        frame = full
+    t.mark("resize")
 
     # запрос из /testframe — сырые стадии снимаем ДО любой обработки/отрисовки.
     # Флаг здесь НЕ гасим: стадии ROI снимаются ниже, когда найдены landmarks,
@@ -745,7 +852,7 @@ def handle_frame(frame: np.ndarray) -> tuple[bytes | None, dict]:
         state["testframe_stats"] = None
         state["testframe_roi"] = None
         try:
-            _dump_testframe(frame)
+            _dump_testframe(full)     # статистика по тому, что реально снял сенсор
         except Exception as e:
             print(f"[testframe] raw dump failed: {e}")
             state["save_testframe"] = False
@@ -767,6 +874,7 @@ def handle_frame(frame: np.ndarray) -> tuple[bytes | None, dict]:
 
     # 3. Запускаем распознавание через новый метод
     result = _hands.detect_for_video(mp_image, frame_timestamp_ms)
+    t.mark("detect")
 
     # debug dump request (consumed once)
     debug_dir = None
@@ -847,31 +955,9 @@ def handle_frame(frame: np.ndarray) -> tuple[bytes | None, dict]:
     #         cv2.circle(frame, pt, 4, (0, 0, 255), -1)
 
     #     out["hand"] = True
-    if result.hand_landmarks:
-        # Словарь, где для каждого пальца задан список его связей и цвет в формате BGR
-        FINGERS_DATA = {
-            "thumb": {  # Большой палец
-                "connections": [(0, 1), (1, 2), (2, 3), (3, 4)],
-                "color": (255, 0, 255)  # Пурпурный
-            },
-            "index": {  # Указательный
-                "connections": [(0, 5), (5, 6), (6, 7), (7, 8)],
-                "color": (255, 0, 0)    # Синий
-            },
-            "middle": { # Средний
-                "connections": [(5, 9), (9, 10), (10, 11), (11, 12)],
-                "color": (0, 255, 0)    # Зеленый
-            },
-            "ring": {   # Безымянный
-                "connections": [(9, 13), (13, 14), (14, 15), (15, 16)],
-                "color": (0, 255, 255)  # Желтый
-            },
-            "pinky": {  # Мизинец и основание ладони
-                "connections": [(13, 17), (0, 17), (17, 18), (18, 19), (19, 20)],
-                "color": (0, 165, 255)  # Оранжевый
-            }
-        }
+    pixel_pts = None            # точки скелета в координатах кадра
 
+    if result.hand_landmarks:
         # В новом API Tasks берем список точек для первой руки
         hand = result.hand_landmarks[0] 
         h_, w_ = frame.shape[:2]
@@ -882,63 +968,59 @@ def handle_frame(frame: np.ndarray) -> tuple[bytes | None, dict]:
                             float(pts[:, 0].max()), float(pts[:, 1].max())]
 
         # контроль качества: мелкую / за кадром / наклонённую ладонь в
-        # усреднение не пускаем (feat=None), но руку считаем присутствующей
-        q_ok, q_reason = palm_quality(frame.shape, hand)
+        # усреднение не пускаем (feat=None), но руку считаем присутствующей.
+        # Качество и кроп считаем по ПОЛНОМУ кадру: именно он уходит в сеть.
+        q_ok, q_reason = palm_quality(full.shape, hand)
         out["hand_quality"] = q_reason
         if q_ok:
             # ROI по межпальцевым впадинам — та же конвенция, что в Tongji/IITD,
             # на которых учили CompNet. Маска не передаётся: в квадрат попадает
             # практически только кожа ладони, а жёсткий контур маски сеть
             # принимала бы за линию ладони.
-            roi, _ = extract_palm_roi_v2(frame, hand)
+            roi, _ = extract_palm_roi_v2(full, hand)
             feat = compute_embedding(roi, mask=None, debug_dir=debug_dir)
         else:
             feat = None
+        t.mark("embed")
 
         # запрос из /testframe — кадр здесь ещё без скелета и оверлея,
         # поэтому кропы честно совпадают с тем, что ушло бы в CompNet
         if state.get("save_testframe"):
             try:
-                _dump_testframe_roi(frame, hand)
+                _dump_testframe_roi(full, hand)
             except Exception as e:
                 print(f"[testframe] roi dump failed: {e}")
                 state["testframe_roi"] = None
 
         # Переводим нормализованные координаты всех 21 точек в физические пиксели кадра
         pixel_pts = [(int(lm.x * w_), int(lm.y * h_)) for lm in hand]
-        
-        # 1. Сначала рисуем линии для каждого пальца своим цветом
-        for finger_name, data in FINGERS_DATA.items():
-            finger_color = data["color"]
-            for connection in data["connections"]:
-                start_idx, end_idx = connection
-                cv2.line(frame, pixel_pts[start_idx], pixel_pts[end_idx], finger_color, 1)
-                
-        # 2. Затем рисуем точки (суставы). Чтобы они соответствовали цвету пальца,
-        # мы красим их в зависимости от их индекса (ID от 0 до 20)
-        for idx, pt in enumerate(pixel_pts):
-            # По умолчанию для запястья (ID 0) используем белый цвет
-            pt_color = (255, 255, 255) 
-            
-            # # Определяем, к какому пальцу относится текущая точка
-            # if idx in [1, 2, 3, 4]:
-            #     pt_color = FINGERS_DATA["thumb"]["color"]
-            # elif idx in [5, 6, 7, 8]:
-            #     pt_color = FINGERS_DATA["index"]["color"]
-            # elif idx in [9, 10, 11, 12]:
-            #     pt_color = FINGERS_DATA["middle"]["color"]
-            # elif idx in [13, 14, 15, 16]:
-            #     pt_color = FINGERS_DATA["ring"]["color"]
-            # elif idx in [17, 18, 19, 20]:
-            #     pt_color = FINGERS_DATA["pinky"]["color"]
-                
-            # Рисуем саму точку
-            cv2.circle(frame, pt, 4, pt_color, -1)
 
         out["hand"] = True
 
+    # ─── кадр для показа ────────────────────────────────────────────────────
+    # Распознавание закончено, дальше кадр только рисуется и уходит в стрим.
+    # Разворачиваем зеркало обратно, чтобы на экране лево и право совпадали с
+    # реальностью, и вместе с кадром отражаем всё, что ляжет поверх него:
+    # точки скелета и bbox ладони (по нему рисуется прицел и подсказки).
+    if not MIRROR_PREVIEW:
+        frame = cv2.flip(frame, 1)
+        fw = frame.shape[1]
+        if pixel_pts is not None:
+            pixel_pts = [(fw - 1 - x, y) for (x, y) in pixel_pts]
+        bbox = out.get("palm_bbox")
+        if bbox:
+            out["palm_bbox"] = [fw - 1 - bbox[2], bbox[1], fw - 1 - bbox[0], bbox[3]]
 
+    if pixel_pts is not None:
+        # 1. Сначала рисуем линии для каждого пальца своим цветом
+        for data in FINGERS_DATA.values():
+            finger_color = data["color"]
+            for start_idx, end_idx in data["connections"]:
+                cv2.line(frame, pixel_pts[start_idx], pixel_pts[end_idx], finger_color, 1)
 
+        # 2. Затем рисуем точки (суставы) — белым, как запястье
+        for pt in pixel_pts:
+            cv2.circle(frame, pt, 4, (255, 255, 255), -1)
 
 
     reg = state["reg"]
@@ -1030,8 +1112,11 @@ def handle_frame(frame: np.ndarray) -> tuple[bytes | None, dict]:
         _finish_testframe()
 
     _draw_overlay(frame, out)
+    t.mark("draw")
 
     ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+    t.mark("jpeg")
+    t.done(full.shape)
     return (jpeg.tobytes() if ok else None), out
 
 
@@ -1091,6 +1176,12 @@ def _draw_overlay(frame: np.ndarray, out: dict) -> None:
         bbox = draw.textbbox((0, 0), s, font=fnt)
         return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
+    # Размеры текста — в долях высоты кадра, а не в фиксированных пикселях.
+    # Кадр 1280x720 в интерфейсе ужимается до ширины карточки, и прежние 18 px
+    # превращались на экране в неразборчивые 6-7.
+    def fsize(frac: float) -> int:
+        return max(12, int(round(h * frac * OVERLAY_FONT_SCALE)))
+
     # ─── target rectangle (corner brackets) ──
     side = int(h * TARGET_RECT_RATIO)
     rx0 = (w - side) // 2
@@ -1118,8 +1209,8 @@ def _draw_overlay(frame: np.ndarray, out: dict) -> None:
             rect_color = (255, 200, 60)
             rect_hint = "Сдвиньте ладонь в центр"
 
-    corner = 36
-    thickness = 4
+    corner = max(16, int(round(h * 0.07)))
+    thickness = max(2, int(round(h * 0.007)))
     for (x, y, dx1, dy1, dx2, dy2) in [
         (rx0, ry0,  corner,  0,       0,       corner),     # top-left
         (rx1, ry0, -corner,  0,       0,       corner),     # top-right
@@ -1130,32 +1221,35 @@ def _draw_overlay(frame: np.ndarray, out: dict) -> None:
         draw.line([(x, y), (x + dx2, y + dy2)], fill=rect_color, width=thickness)
 
     if rect_hint:
-        fnt = _font(18)
+        fnt = _font(fsize(0.055))
         tw, th = text_size(rect_hint, fnt)
-        tx, ty = (w - tw) // 2, ry1 + 8
-        draw.rectangle([tx - 8, ty - 4, tx + tw + 8, ty + th + 4], fill=(0, 0, 0))
+        pad_x, pad_y = th // 2, th // 4
+        tx, ty = (w - tw) // 2, ry1 + th // 2
+        draw.rectangle([tx - pad_x, ty - pad_y, tx + tw + pad_x, ty + th + pad_y],
+                       fill=(0, 0, 0))
         draw.text((tx, ty), rect_hint, fill=rect_color, font=fnt)
 
     def banner(text: str, color_rgb: tuple[int, int, int]):
-        fnt = _font(22)
+        fnt = _font(fsize(0.06))
         tw, th = text_size(text, fnt)
-        draw.rectangle([0, 0, w, th + 20], fill=(0, 0, 0))
-        draw.text(((w - tw) // 2, 8), text, fill=color_rgb, font=fnt)
+        draw.rectangle([0, 0, w, th + th], fill=(0, 0, 0))
+        draw.text(((w - tw) // 2, th // 2), text, fill=color_rgb, font=fnt)
 
     def toast(text: str, color_rgb: tuple[int, int, int]):
-        fnt = _font(26)
+        fnt = _font(fsize(0.07))
         tw, th = text_size(text, fnt)
-        x0, y0 = (w - tw) // 2 - 14, h // 2 - th // 2 - 10
-        x1, y1 = (w + tw) // 2 + 14, h // 2 + th // 2 + 10
+        pad_x, pad_y = th // 2, th // 3
+        x0, y0 = (w - tw) // 2 - pad_x, h // 2 - th // 2 - pad_y
+        x1, y1 = (w + tw) // 2 + pad_x, h // 2 + th // 2 + pad_y
         draw.rectangle([x0, y0, x1, y1], fill=(0, 0, 0, 220))
         draw.text(((w - tw) // 2, h // 2 - th // 2), text, fill=color_rgb, font=fnt)
 
     def bottom(text: str, color_rgb: tuple[int, int, int], sub: str | None = None):
-        fnt = _font(20)
-        sub_fnt = _font(14)
+        fnt = _font(fsize(0.055))
+        sub_fnt = _font(fsize(0.038))
         tw, th = text_size(text, fnt)
         sw, sh = (0, 0) if not sub else text_size(sub, sub_fnt)
-        pad = 8
+        pad = max(6, th // 3)
         box_w = max(tw, sw) + 2 * pad
         y_bottom = h - 10
         y_top = y_bottom - th - (sh + 4 if sub else 0) - 2 * pad

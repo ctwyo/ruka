@@ -1,0 +1,52 @@
+{
+  "shape": [
+    480,
+    640,
+    3
+  ],
+  "channels": 3,
+  "dtype": "uint8",
+  "channel_diff": 0.0,
+  "looks_grayscale": true,
+  "brightness_mean": 23.5,
+  "brightness_min": 0,
+  "brightness_max": 123,
+  "shot": "20260904_094602",
+  "roi": {
+    "quality": "ok",
+    "quality_ok": true,
+    "v1_side_px": 264,
+    "v2_side_px": 120,
+    "v2_angle_deg": 10.0,
+    "v2_valley_dist_px": 85.6,
+    "v2_quality": {
+      "mean": 103.7,
+      "contrast": 7.1,
+      "clip_dark_pct": 0.0,
+      "clip_bright_pct": 0.0,
+      "focus": 3.2,
+      "sharpness": 1.88
+    },
+    "v1_quality": {
+      "mean": 51.0,
+      "contrast": 49.6,
+      "clip_dark_pct": 46.6,
+      "clip_bright_pct": 0.0,
+      "focus": 612.0,
+      "sharpness": 84.51
+    }
+  },
+  "camera": {
+    "width": 640,
+    "height": 480,
+    "fps": 0.0,
+    "autofocus": -1.0,
+    "focus": -1.0,
+    "auto_exposure": -1.0,
+    "exposure": -6.0,
+    "gain": 0.0,
+    "brightness": 0.0,
+    "contrast": 32.0,
+    "sharpness": 3.0
+  }
+}
